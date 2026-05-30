@@ -405,29 +405,37 @@ document.getElementById('search-input').addEventListener('input', e => {
 
 Two SDKs, one mental model, one server. The vector store gives you ranked semantic hits; the api watch keeps them honest about their current content.
 
-### Framework integration (React, Vue, Svelte)
+### Framework integration
 
-Every framework wants the same thing: start the subscription on mount, abort it on unmount. The pattern reduces to a hook (React) or composition function (Vue) / store (Svelte). Here it is in React:
+Every framework wants the same shape: start the subscription on mount, abort it on unmount. Below — the same `useLiveEntities` / `liveEntities` helper in React, Vue 3, and Svelte. The SDK is framework-agnostic; `AbortController` is the universal cleanup primitive.
+
+The shared module — used by every variant below — wires the client once and exports it:
 
 ```js
-import { useEffect, useState } from 'react'
+// mikser.js — single source of truth for the configured client
 import { createClient } from 'mikser-io-sdk-api'
+export const docs = createClient({ baseUrl: 'https://cms.example.com' })
+    .entities('public')
+```
 
-const docs = createClient({ baseUrl: 'https://cms.example.com' }).entities('public')
+#### React (hook)
 
-function useLiveEntities(filter) {
+```js
+// useLiveEntities.js
+import { useEffect, useState } from 'react'
+import { docs } from './mikser'
+
+export function useLiveEntities(filter) {
     const [items, setItems] = useState([])
 
     useEffect(() => {
         const ac = new AbortController()
         let mounted = true
 
-        // Initial snapshot
         docs.list({ filter }).then(({ items }) => {
             if (mounted) setItems(items)
         })
 
-        // Forward updates
         ;(async () => {
             for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
                 if (!mounted) return
@@ -437,17 +445,18 @@ function useLiveEntities(filter) {
             }
         })()
 
-        return () => {
-            mounted = false
-            ac.abort()
-        }
+        return () => { mounted = false; ac.abort() }
     }, [JSON.stringify(filter)])
 
     return items
 }
+```
 
-// Use it in any component
-function ArticleList() {
+```jsx
+// ArticleList.jsx
+import { useLiveEntities } from './useLiveEntities'
+
+export function ArticleList() {
     const articles = useLiveEntities({
         type: 'document',
         'meta.collection': 'articles',
@@ -461,7 +470,149 @@ function ArticleList() {
 }
 ```
 
-Same shape adapts to Vue 3's `onMounted` / `onUnmounted` or Svelte's `onMount` / `onDestroy`. The SDK is framework-agnostic — `AbortController` is the universal cleanup primitive.
+#### Vue 3 (composable, Composition API)
+
+```js
+// useLiveEntities.js
+import { ref, onMounted, onUnmounted } from 'vue'
+import { docs } from './mikser'
+
+export function useLiveEntities(filter) {
+    const items = ref([])
+    let ac
+
+    onMounted(() => {
+        ac = new AbortController()
+
+        docs.list({ filter }).then(({ items: initial }) => {
+            items.value = initial
+        })
+
+        ;(async () => {
+            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
+                if (event.type === 'create') items.value = [...items.value, event.entity]
+                if (event.type === 'update') items.value = items.value.map(i => i.id === event.id ? event.entity : i)
+                if (event.type === 'delete') items.value = items.value.filter(i => i.id !== event.id)
+            }
+        })()
+    })
+
+    onUnmounted(() => ac?.abort())
+
+    return { items }
+}
+```
+
+```vue
+<!-- ArticleList.vue -->
+<script setup>
+import { useLiveEntities } from './useLiveEntities'
+
+const { items: articles } = useLiveEntities({
+    type: 'document',
+    'meta.collection': 'articles',
+    'meta.published':  true,
+})
+</script>
+
+<template>
+    <ul>
+        <li v-for="a in articles" :key="a.id">{{ a.meta.title }}</li>
+    </ul>
+</template>
+```
+
+#### Svelte (writable store — works in Svelte 3, 4, and 5)
+
+Svelte's `writable(initial, start)` pattern is the cleanest fit: pass a `start` function that returns a `stop` function. Svelte calls `start` automatically when the store gains its first subscriber and `stop` when it loses its last one — mount / unmount lifecycle handled for free.
+
+```js
+// liveEntities.js
+import { writable } from 'svelte/store'
+import { docs } from './mikser'
+
+export function liveEntities(filter) {
+    return writable([], (set, update) => {
+        const ac = new AbortController()
+
+        docs.list({ filter }).then(({ items }) => set(items))
+
+        ;(async () => {
+            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
+                if (event.type === 'create') update(items => [...items, event.entity])
+                if (event.type === 'update') update(items => items.map(i => i.id === event.id ? event.entity : i))
+                if (event.type === 'delete') update(items => items.filter(i => i.id !== event.id))
+            }
+        })()
+
+        // Returned cleanup runs when the last subscriber disappears.
+        return () => ac.abort()
+    })
+}
+```
+
+```svelte
+<!-- ArticleList.svelte -->
+<script>
+    import { liveEntities } from './liveEntities'
+
+    const articles = liveEntities({
+        type: 'document',
+        'meta.collection': 'articles',
+        'meta.published':  true,
+    })
+</script>
+
+<ul>
+    {#each $articles as a (a.id)}
+        <li>{a.meta.title}</li>
+    {/each}
+</ul>
+```
+
+If you're on Svelte 5 and prefer runes over stores, the same flow with `$state` + `onMount`:
+
+```svelte
+<!-- ArticleList.svelte (Svelte 5 runes) -->
+<script>
+    import { onMount } from 'svelte'
+    import { docs } from './mikser'
+
+    let articles = $state([])
+    const filter = { type: 'document', 'meta.collection': 'articles', 'meta.published': true }
+
+    onMount(() => {
+        const ac = new AbortController()
+
+        docs.list({ filter }).then(({ items }) => { articles = items })
+
+        ;(async () => {
+            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
+                if (event.type === 'create') articles = [...articles, event.entity]
+                if (event.type === 'update') articles = articles.map(i => i.id === event.id ? event.entity : i)
+                if (event.type === 'delete') articles = articles.filter(i => i.id !== event.id)
+            }
+        })()
+
+        return () => ac.abort()
+    })
+</script>
+
+<ul>
+    {#each articles as a (a.id)}
+        <li>{a.meta.title}</li>
+    {/each}
+</ul>
+```
+
+Notice the identical body across all three (and both Svelte variants):
+
+1. Take `filter` as input.
+2. On mount: `list()` once, then start the `watch()` iterator in the background.
+3. Patch local state on each `create` / `update` / `delete` event.
+4. On unmount: `AbortController.abort()` — the iterator exits, the server-side subscription is cleaned up.
+
+The same skeleton works for Solid (`createSignal` + `onCleanup`), Qwik (`useTask$`), or vanilla JS (anywhere with mount/unmount hooks). The SDK doesn't care.
 
 ## Configure
 
