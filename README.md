@@ -33,6 +33,66 @@ const { items, total, hasNext } = await docs.list({
 })
 ```
 
+## Wiring it together
+
+The contract has three pieces: server config, an endpoint URL, an SDK call. Each maps 1:1 — if you can read the server's `api.endpoints` block, you know exactly what the SDK can do.
+
+**On the server** — `mikser.config.js` declares named endpoints. Each endpoint becomes a URL path; its options control what's visible, what operations are allowed, and whether a token is required.
+
+```js
+// mikser.config.js — on the server
+export default {
+    plugins: ['documents', 'layouts', 'render-hbs', 'api'],
+
+    api: {
+        endpoints: {
+            // Public reader — anyone can list published docs, no token.
+            // `subscribe` is opt-in for public endpoints (each connection
+            // holds resources), so list it explicitly here.
+            public: {
+                query: e => e.type === 'document' && e.meta?.published,
+                operations: ['list', 'subscribe'],
+            },
+
+            // Editor — token-gated, full surface. Defaults already
+            // include list/update/delete/render/subscribe when token
+            // is set, so the operations array can be omitted.
+            editor: {
+                token: process.env.EDITOR_TOKEN,
+            },
+        },
+    },
+}
+```
+
+**On the client** — one `createClient` per app, then one `entities(name)` per endpoint:
+
+```js
+import { createClient } from 'mikser-io-sdk-api'
+
+const mikser = createClient({ baseUrl: 'https://cms.example.com' })
+
+// Reads public docs only (server's `query` scope hides drafts)
+const docs = mikser.entities('public')
+
+// Token-gated — can write + render, in addition to read + subscribe
+const editor = mikser.entities('editor', { token: process.env.EDITOR_TOKEN })
+```
+
+The mapping is direct:
+
+| Server (`mikser.config.js`)         | Client (SDK)                              |
+|---|---|
+| `api.endpoints.public`              | `mikser.entities('public')`               |
+| `api.endpoints.editor.token`        | `mikser.entities('editor', { token })`    |
+| `query: e => …`                     | invisible — applied server-side as outer scope |
+| `operations: ['list']`              | only `.list()` / `.query()` / `.urlFor()` / `.pages()` succeed |
+| `operations: [..., 'subscribe']`    | `.watch()` works                          |
+| `operations: [..., 'update', 'delete']` | `.update()` / `.delete()` work        |
+| `operations: [..., 'render']`       | `.render()` works                         |
+
+Operations outside the endpoint's allowlist return `403`; missing or wrong tokens return `401` (both thrown as `MikserError`). The server is always the boundary — the SDK is just the typed shape of what the boundary lets through.
+
 ## Entities
 
 `mikser.entities(endpointName, { token })` returns a per-endpoint client. The endpoint name matches a key in your `api.endpoints` config on the server.
@@ -147,6 +207,261 @@ Return shape follows the response `content-type`:
 - `application/json` → parsed JSON
 - `text/*` → `string`
 - anything else (`application/pdf`, images, …) → `ArrayBuffer`
+
+## Recipes — composing real-time and search
+
+The methods above are the building blocks. The interesting work is gluing them together — `list()` for an initial snapshot, `watch()` to keep it fresh, and `findSimilar()` (from [`mikser-io-sdk-vector`](https://github.com/almero-digital-marketing/mikser-io-sdk-vector)) when the user is searching by meaning rather than fields.
+
+### Live article index for a marketing site
+
+The home page shows the latest published articles. When an editor publishes a new one through Decap (or anything that writes to the documents folder), it should appear without a refresh; edits update in place; deletions disappear. The same `filter` drives both the initial fetch and the live subscription, so the two stay in sync.
+
+```js
+import { createClient } from 'mikser-io-sdk-api'
+
+const docs = createClient({ baseUrl: 'https://cms.example.com' })
+    .entities('public')
+
+// One filter expression, used for both list() and watch() — keeps the
+// "what counts as visible" decision in one place.
+const filter = {
+    type: 'document',
+    'meta.collection': 'articles',
+    'meta.published':  true,
+}
+
+const list = document.getElementById('article-list')
+const byId = new Map() // id → DOM element
+
+function render(entity) {
+    const el = document.createElement('article')
+    el.dataset.id   = entity.id
+    el.dataset.date = entity.meta.date
+    el.innerHTML = `
+        <h2>${entity.meta.title}</h2>
+        <time>${entity.meta.date}</time>
+        <p>${entity.meta.summary ?? ''}</p>
+    `
+    return el
+}
+
+function insertSortedByDate(el) {
+    // New items go to the top of the list, preserving date-desc order.
+    const next = [...list.children].find(c => c.dataset.date < el.dataset.date)
+    if (next) list.insertBefore(el, next); else list.appendChild(el)
+}
+
+// 1. Initial snapshot — render what's already published.
+const { items } = await docs.list({
+    filter,
+    sort:   { 'meta.date': -1 },
+    fields: ['id', 'meta.title', 'meta.date', 'meta.summary'],
+    limit:  20,
+})
+for (const item of items) {
+    const el = render(item)
+    byId.set(item.id, el)
+    insertSortedByDate(el)
+}
+
+// 2. Forward subscription — patch the DOM as content changes.
+const ac = new AbortController()
+addEventListener('beforeunload', () => ac.abort())
+
+for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
+    switch (event.type) {
+        case 'create': {
+            const el = render(event.entity)
+            byId.set(event.id, el)
+            insertSortedByDate(el)
+            break
+        }
+        case 'update': {
+            const old = byId.get(event.id)
+            const el  = render(event.entity)
+            byId.set(event.id, el)
+            if (old) old.replaceWith(el); else insertSortedByDate(el)
+            break
+        }
+        case 'delete': {
+            byId.get(event.id)?.remove()
+            byId.delete(event.id)
+            break
+        }
+        // 'init' fires once when the subscription opens — no-op here.
+        // 'heartbeat' fires periodically to keep the connection alive.
+    }
+}
+```
+
+Notice the same filter scope on both calls. The server's endpoint scope (`type === 'document' && meta?.published`) ANDs with it on both sides, so unpublishing a doc in Decap fires a `delete` event from this filter's perspective even though the file still exists — the entity dropped out of the visible set.
+
+### Single-document live preview
+
+An editor previews a `.md` they're writing; the preview pane should re-render whenever the file is saved.
+
+```js
+const docs = createClient({ baseUrl: 'https://cms.example.com' })
+    .entities('public')
+
+const previewedId = '/documents/en/draft.md'
+const pane = document.getElementById('preview')
+
+async function refresh() {
+    const { items: [entity] } = await docs.list({
+        filter: { id: previewedId },
+        limit:  1,
+    })
+    pane.innerHTML = entity?.content ?? '<em>not found</em>'
+}
+
+await refresh()
+
+// Subscribe only to events touching this one entity — the filter is
+// just an equality match on `id`.
+const ac = new AbortController()
+for await (const event of docs.watch(
+    { filter: { id: previewedId } },
+    { signal: ac.signal },
+)) {
+    if (event.type === 'update') await refresh()
+    if (event.type === 'delete') pane.innerHTML = '<em>document deleted</em>'
+}
+```
+
+The narrow filter (`{ id: previewedId }`) means the subscription fires only for this exact entity. Mikser's server still walks the full journal per cycle, but for this client only one match dispatches.
+
+### Search + enrich + live (mixing both SDKs)
+
+A search-as-you-type UI. The user types a query; the **vector** SDK does semantic search and returns ranked hits; the **api** SDK keeps the list of currently displayed docs in sync if any of them changes underneath.
+
+```js
+import { createClient as createApiClient    } from 'mikser-io-sdk-api'
+import { createClient as createVectorClient } from 'mikser-io-sdk-vector'
+
+const baseUrl = 'https://cms.example.com'
+const docs   = createApiClient(   { baseUrl }).entities('public')
+const search = createVectorClient({ baseUrl }).vector('documents')
+
+const results  = new Map() // id → result row { id, distance, title, summary }
+const resultsEl = document.getElementById('search-results')
+
+function rerender() {
+    resultsEl.innerHTML = ''
+    for (const r of results.values()) {
+        const el = document.createElement('li')
+        el.innerHTML = `<strong>${r.title}</strong><br><small>${r.distance.toFixed(3)}</small><p>${r.summary ?? ''}</p>`
+        el.dataset.id = r.id
+        resultsEl.appendChild(el)
+    }
+}
+
+async function runSearch(text) {
+    results.clear()
+    // `data` is whatever your server's vector.stores[name].map() returned —
+    // typically { title, summary, ... } — so render directly without a
+    // second fetch.
+    const hits = await search.findSimilar(text, { limit: 10 })
+    for (const { id, distance, data } of hits.results) {
+        results.set(id, {
+            id, distance,
+            title:   data?.title ?? id,
+            summary: data?.summary,
+        })
+    }
+    rerender()
+}
+
+// Background subscription — refresh result rows whose entities change.
+// Vector results don't re-rank on the fly, but we DO want the displayed
+// metadata (title, summary) to stay fresh, and we want deleted docs to
+// drop out.
+const ac = new AbortController()
+;(async () => {
+    for await (const event of docs.watch(
+        { filter: { type: 'document' } },
+        { signal: ac.signal },
+    )) {
+        if (event.type === 'delete' && results.has(event.id)) {
+            results.delete(event.id)
+            rerender()
+        }
+        if (event.type === 'update' && results.has(event.id)) {
+            const r = results.get(event.id)
+            results.set(event.id, {
+                ...r,
+                title:   event.entity.meta?.title   ?? r.title,
+                summary: event.entity.meta?.summary ?? r.summary,
+            })
+            rerender()
+        }
+    }
+})()
+
+document.getElementById('search-input').addEventListener('input', e => {
+    if (e.target.value.length >= 3) runSearch(e.target.value)
+})
+```
+
+Two SDKs, one mental model, one server. The vector store gives you ranked semantic hits; the api watch keeps them honest about their current content.
+
+### Framework integration (React, Vue, Svelte)
+
+Every framework wants the same thing: start the subscription on mount, abort it on unmount. The pattern reduces to a hook (React) or composition function (Vue) / store (Svelte). Here it is in React:
+
+```js
+import { useEffect, useState } from 'react'
+import { createClient } from 'mikser-io-sdk-api'
+
+const docs = createClient({ baseUrl: 'https://cms.example.com' }).entities('public')
+
+function useLiveEntities(filter) {
+    const [items, setItems] = useState([])
+
+    useEffect(() => {
+        const ac = new AbortController()
+        let mounted = true
+
+        // Initial snapshot
+        docs.list({ filter }).then(({ items }) => {
+            if (mounted) setItems(items)
+        })
+
+        // Forward updates
+        ;(async () => {
+            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
+                if (!mounted) return
+                if (event.type === 'create') setItems(prev => [...prev, event.entity])
+                if (event.type === 'update') setItems(prev => prev.map(i => i.id === event.id ? event.entity : i))
+                if (event.type === 'delete') setItems(prev => prev.filter(i => i.id !== event.id))
+            }
+        })()
+
+        return () => {
+            mounted = false
+            ac.abort()
+        }
+    }, [JSON.stringify(filter)])
+
+    return items
+}
+
+// Use it in any component
+function ArticleList() {
+    const articles = useLiveEntities({
+        type: 'document',
+        'meta.collection': 'articles',
+        'meta.published':  true,
+    })
+    return (
+        <ul>
+            {articles.map(a => <li key={a.id}>{a.meta.title}</li>)}
+        </ul>
+    )
+}
+```
+
+Same shape adapts to Vue 3's `onMounted` / `onUnmounted` or Svelte's `onMount` / `onDestroy`. The SDK is framework-agnostic — `AbortController` is the universal cleanup primitive.
 
 ## Configure
 
