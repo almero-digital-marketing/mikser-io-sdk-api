@@ -1,25 +1,25 @@
 // mikser-io-sdk-api
 //
-// A tiny client wrapper over the mikser-io api and vector plugins.
-// Designed to run in the browser and in Node 18+ — uses the global
+// A tiny client wrapper over the mikser-io `api` plugin — list/query
+// the document catalog from the browser or Node 18+. Uses the global
 // `fetch`. Zero dependencies.
+//
+// For semantic search against the `vector` plugin, install
+// mikser-io-sdk-vector — it ships as a separate package.
 //
 // Usage:
 //
 //   import { createClient } from 'mikser-io-sdk-api'
 //
 //   const mikser = createClient({ baseUrl: 'http://localhost:3001' })
-//
 //   const docs = mikser.entities('public')
+//
 //   const { items } = await docs.list({
 //       filter: { 'meta.published': true, 'meta.price': { $gt: 20 } },
 //       sort:   { 'meta.date': -1 },
 //       fields: ['id', 'meta.title'],
 //       limit:  10,
 //   })
-//
-//   const search = mikser.vector('documents')
-//   const { results } = await search.findSimilar('how to publish a report')
 
 class MikserError extends Error {
     constructor(status, statusText, body, url) {
@@ -81,14 +81,12 @@ function filterToParams(filter, params) {
  * @param {Object} options
  * @param {string} options.baseUrl       Origin of the mikser server (e.g. https://cms.example.com)
  * @param {string} [options.basePath]    api plugin mount path; default '/api'
- * @param {string} [options.vectorPath]  vector plugin mount path; default '/vector'
  * @param {typeof fetch} [options.fetch] override the fetch implementation (default: globalThis.fetch)
  * @param {Record<string,string>} [options.headers] headers attached to every request
  */
 export function createClient({
     baseUrl,
     basePath = '/api',
-    vectorPath = '/vector',
     fetch: fetchImpl,
     headers: defaultHeaders = {},
 } = {}) {
@@ -216,32 +214,7 @@ export function createClient({
         return { list, query: list, urlFor, pages, update, delete: remove, render }
     }
 
-    /** Per-store vector search client. */
-    function vector(storeName, { token } = {}) {
-        const url = joinUrl(baseUrl, `${vectorPath}/${storeName}`)
-
-        /**
-         * Semantic search against a vector store. Returns
-         * { results: [{ id, distance, data }, ...] }. `data` is the
-         * original mapped object that was embedded.
-         */
-        async function findSimilar(q, { limit = 5 } = {}) {
-            const res = await doFetch(url, {
-                method: 'POST',
-                headers: {
-                    'content-type': 'application/json',
-                    ...defaultHeaders,
-                    ...bearer(token),
-                },
-                body: JSON.stringify({ q, limit }),
-            })
-            return jsonOrThrow(res, url)
-        }
-
-        return { findSimilar }
-    }
-
-    return { entities, vector }
+    return { entities }
 }
 
 export { MikserError }

@@ -1,8 +1,10 @@
 # mikser-io-sdk-api
 
-Client SDK for querying a [mikser-io](https://github.com/almero-digital-marketing/mikser-io) server from the browser or Node — documents (`api` plugin) and semantic search (`vector` plugin) behind one tiny client.
+Client SDK for querying a [mikser-io](https://github.com/almero-digital-marketing/mikser-io) server's `api` plugin from the browser or Node — list / query / paginate / project the document catalog and trigger renders.
 
-Mikser keeps content as plain files. This SDK lets the frontend ask for exactly the slice it needs over HTTP — Mongo-style filter operators, sort, projection, pagination, semantic search — without shipping the whole catalog and filtering in JS.
+Mikser keeps content as plain files. This SDK lets the frontend ask for exactly the slice it needs over HTTP — Mongo-style filter operators, sort, projection, pagination — without shipping the whole catalog and filtering in JS.
+
+For semantic search against the `vector` plugin, install [mikser-io-sdk-vector](https://github.com/almero-digital-marketing/mikser-io-sdk-vector) — it ships as a separate package.
 
 Zero dependencies. Runs anywhere `fetch` is available (modern browsers, Node 18+, Deno, Bun, Workers).
 
@@ -18,8 +20,6 @@ npm install mikser-io-sdk-api
 import { createClient } from 'mikser-io-sdk-api'
 
 const mikser = createClient({ baseUrl: 'http://localhost:3001' })
-
-// --- documents (api plugin) ---
 const docs = mikser.entities('public')
 
 const { items, total, hasNext } = await docs.list({
@@ -31,11 +31,6 @@ const { items, total, hasNext } = await docs.list({
     fields: ['id', 'meta.title', 'meta.price'],
     limit:  10,
 })
-
-// --- semantic search (vector plugin) ---
-const search = mikser.vector('documents')
-const { results } = await search.findSimilar('how to publish a report', { limit: 5 })
-// results = [{ id, distance, data: { title, ... } }, ...]
 ```
 
 ## Entities
@@ -123,33 +118,14 @@ Return shape follows the response `content-type`:
 - `text/*` → `string`
 - anything else (`application/pdf`, images, …) → `ArrayBuffer`
 
-## Vector
-
-`mikser.vector(storeName, { token })` returns a per-store client. The store name matches a key in your `vector.stores` config on the server.
-
-```js
-const search = mikser.vector('documents', { token: process.env.SEARCH_TOKEN })
-
-const { results } = await search.findSimilar('how to publish a report', { limit: 5 })
-
-for (const { id, distance, data } of results) {
-    console.log(distance.toFixed(3), data?.title, '→', id)
-}
-```
-
-`distance` is cosine distance (range ~0–2; lower = closer). Only the *ordering* is meaningful — don't compare absolute values across queries.
-
-`data` is the original object your `map(entity)` returned on the server (`{ title, lang, summary, ... }` — whatever you chose to embed) — so you can render the hit without a second fetch.
-
 ## Configure
 
 ```js
 const mikser = createClient({
-    baseUrl:    'https://cms.example.com',
-    basePath:   '/api',        // default — must match api.base on the server
-    vectorPath: '/vector',     // default — must match vector.base on the server
-    headers:    { 'x-trace-id': '...' },   // attached to every request
-    fetch:      myFetchImpl,   // override (default: globalThis.fetch)
+    baseUrl:  'https://cms.example.com',
+    basePath: '/api',        // default — must match api.base on the server
+    headers:  { 'x-trace-id': '...' },   // attached to every request
+    fetch:    myFetchImpl,   // override (default: globalThis.fetch)
 })
 ```
 
@@ -174,11 +150,24 @@ try {
 Full type declarations ship with the package — including a `Filter` type that covers the sift operator subset.
 
 ```ts
-import type { ListEnvelope, VectorResult } from 'mikser-io-sdk-api'
+import type { ListEnvelope } from 'mikser-io-sdk-api'
 
 interface Doc { id: string; meta: { title: string; price?: number } }
 
 const env: ListEnvelope<Doc> = await mikser.entities('public').list<Doc>({ ... })
+```
+
+## Using both SDKs together
+
+If a project needs both document queries and semantic search, install both packages and alias the factories:
+
+```js
+import { createClient as createApiClient }    from 'mikser-io-sdk-api'
+import { createClient as createVectorClient } from 'mikser-io-sdk-vector'
+
+const baseUrl = 'http://localhost:3001'
+const docs   = createApiClient({ baseUrl }).entities('public')
+const search = createVectorClient({ baseUrl }).vector('documents')
 ```
 
 ## License

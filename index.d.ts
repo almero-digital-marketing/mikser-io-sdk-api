@@ -7,8 +7,6 @@ export interface ClientOptions {
     baseUrl: string
     /** api plugin mount path (default '/api'). */
     basePath?: string
-    /** vector plugin mount path (default '/vector'). */
-    vectorPath?: string
     /** Override fetch (default: globalThis.fetch). */
     fetch?: typeof fetch
     /** Headers attached to every request. */
@@ -100,24 +98,8 @@ export interface EntitiesClient {
     render(entity: Record<string, unknown>, options?: RenderOptions): Promise<unknown>
 }
 
-export interface VectorResult<D = unknown> {
-    id: string
-    distance: number
-    data: D | null
-}
-
-export interface VectorEnvelope<D = unknown> {
-    results: VectorResult<D>[]
-}
-
-export interface VectorClient {
-    /** POST /vector/:store — semantic search. */
-    findSimilar<D = unknown>(q: string, options?: { limit?: number }): Promise<VectorEnvelope<D>>
-}
-
 export interface MikserClient {
     entities(name: string, options?: EntityOptions): EntitiesClient
-    vector(storeName: string, options?: EntityOptions): VectorClient
 }
 
 export declare function createClient(options: ClientOptions): MikserClient

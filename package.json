@@ -1,7 +1,7 @@
 {
   "name": "mikser-io-sdk-api",
-  "version": "1.0.0",
-  "description": "Client SDK for mikser-io — query the document catalog and the vector store from the browser or Node",
+  "version": "2.0.0",
+  "description": "Client SDK for mikser-io's api plugin — query the document catalog from the browser or Node",
   "main": "index.js",
   "types": "index.d.ts",
   "type": "module",
@@ -33,8 +33,7 @@
     "mikser-io",
     "sdk",
     "client",
-    "query",
-    "vector"
+    "query"
   ],
   "engines": {
     "node": ">=18"
