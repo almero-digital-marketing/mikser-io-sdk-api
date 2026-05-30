@@ -81,6 +81,18 @@ export interface RenderOptions {
     [key: string]: unknown
 }
 
+export type WatchEvent<T = unknown> =
+    | { type: 'init'; subscriptionId: string; endpoint: string }
+    | { type: 'create'; id: string; entity: T }
+    | { type: 'update'; id: string; entity: T }
+    | { type: 'delete'; id: string }
+    | { type: 'heartbeat' }
+
+export interface WatchOptions {
+    /** Abort the SSE stream. */
+    signal?: AbortSignal
+}
+
 export interface EntitiesClient {
     /** POST /entities/query — body-based, supports any sift filter. */
     list<T = unknown>(query?: ListQuery): Promise<ListEnvelope<T>>
@@ -90,6 +102,11 @@ export interface EntitiesClient {
     urlFor(query?: ListQuery): string
     /** Iterate result pages — yields each envelope until hasNext is false. */
     pages<T = unknown>(query?: ListQuery): AsyncGenerator<ListEnvelope<T>>
+    /**
+     * Open an SSE stream and yield events as matching entities change.
+     * Compose with list() for initial state, then watch() for updates.
+     */
+    watch<T = unknown>(query?: ListQuery, options?: WatchOptions): AsyncGenerator<WatchEvent<T>>
     /** PUT — upsert a file in a collection folder. */
     update(payload: UpdatePayload): Promise<{ ok: true }>
     /** DELETE — remove a file from a collection folder. */

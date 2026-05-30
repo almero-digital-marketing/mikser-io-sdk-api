@@ -1,6 +1,6 @@
 # mikser-io-sdk-api
 
-Client SDK for querying a [mikser-io](https://github.com/almero-digital-marketing/mikser-io) server's `api` plugin from the browser or Node — list / query / paginate / project the document catalog and trigger renders.
+Client SDK for querying a [mikser-io](https://github.com/almero-digital-marketing/mikser-io) server's `api` plugin from the browser or Node — list / query / paginate / project the document catalog, subscribe to live changes, and trigger renders.
 
 Mikser keeps content as plain files. This SDK lets the frontend ask for exactly the slice it needs over HTTP — Mongo-style filter operators, sort, projection, pagination — without shipping the whole catalog and filtering in JS.
 
@@ -83,6 +83,36 @@ for await (const env of docs.pages({ filter: { type: 'document' }, limit: 50 }))
     }
 }
 ```
+
+### `watch(query, { signal })` — live subscription via SSE
+
+Open a Server-Sent Events stream and yield events as matching entities change. Composes with `list()` — call once for the initial snapshot, then `watch()` for forward updates.
+
+```js
+const ac = new AbortController()
+
+// Initial state
+const { items } = await docs.list({ filter: { 'meta.published': true } })
+items.forEach(addToView)
+
+// Forward updates
+for await (const event of docs.watch(
+    { filter: { 'meta.published': true } },
+    { signal: ac.signal },
+)) {
+    switch (event.type) {
+        case 'create':    addToView(event.entity); break
+        case 'update': updateInView(event.entity); break
+        case 'delete': removeFromView(event.id); break
+    }
+}
+
+// Call ac.abort() to close the stream.
+```
+
+Events fire on **every** server process cycle — both file-watcher–driven changes (the editor saving a file, decap committing) and programmatic writes (`update()` / `delete()` via this SDK). No second mechanism to wire up.
+
+Requires the endpoint to include `subscribe` in its `operations`. Public endpoints don't get it by default (each connection holds resources); token-gated endpoints do.
 
 ### `update(payload)` / `delete(payload)` — writes
 

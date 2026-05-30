@@ -58,6 +58,23 @@ function sortToParam(sort) {
         .join(',')
 }
 
+// Parse one SSE event block ("event: foo\ndata: {...}\n"). Returns
+// { type, ...payload } when data is JSON; { type, data } otherwise.
+// Returns null on completely empty blocks (e.g. comment-only).
+function parseSseEvent(raw) {
+    let type = 'message'
+    let data = ''
+    let sawAny = false
+    for (const line of raw.split('\n')) {
+        if (line.startsWith(':')) continue          // SSE comment
+        if (line.startsWith('event:')) { type = line.slice(6).trim(); sawAny = true; continue }
+        if (line.startsWith('data:'))  { data += line.slice(5).trim(); sawAny = true; continue }
+    }
+    if (!sawAny) return null
+    try { return { type, ...JSON.parse(data || '{}') } }
+    catch { return { type, data } }
+}
+
 // Walk a filter object and emit URL params using the api plugin's
 // operator-suffix convention: { 'meta.price': { $gt: 20 } } → meta.price.$gt=20.
 // Plain values become equality params: { type: 'document' } → type=document.
@@ -99,9 +116,10 @@ export function createClient({
     /** Per-endpoint entity client. */
     function entities(name, { token } = {}) {
         const endpointBase = `${basePath}/${name}`
-        const queryUrl  = joinUrl(baseUrl, `${endpointBase}/entities/query`)
-        const listUrl   = joinUrl(baseUrl, `${endpointBase}/entities`)
-        const renderUrl = joinUrl(baseUrl, `${endpointBase}/render`)
+        const queryUrl     = joinUrl(baseUrl, `${endpointBase}/entities/query`)
+        const listUrl      = joinUrl(baseUrl, `${endpointBase}/entities`)
+        const subscribeUrl = joinUrl(baseUrl, `${endpointBase}/entities/subscribe`)
+        const renderUrl    = joinUrl(baseUrl, `${endpointBase}/render`)
 
         /**
          * Body-based query. Send everything sift accepts —
@@ -149,6 +167,62 @@ export function createClient({
                 yield env
                 if (!env.hasNext) return
                 page = env.page + 1
+            }
+        }
+
+        /**
+         * Subscribe to changes — opens an SSE stream and yields events
+         * for each matching entity change (CREATE / UPDATE / DELETE).
+         * Composable with list(): call list() once for the initial state,
+         * then watch() for forward updates.
+         *
+         * Yielded events:
+         *   { type: 'init',      subscriptionId, endpoint }
+         *   { type: 'create',    id, entity }
+         *   { type: 'update',    id, entity }
+         *   { type: 'delete',    id }
+         *   { type: 'heartbeat' }
+         *
+         * Pass { signal } from an AbortController to close the stream.
+         */
+        async function* watch(query = {}, { signal } = {}) {
+            const url = new URL(subscribeUrl)
+            if (query.filter) filterToParams(query.filter, url.searchParams)
+
+            const res = await doFetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    accept: 'text/event-stream',
+                    ...defaultHeaders,
+                    ...bearer(token),
+                },
+                signal,
+            })
+            if (!res.ok) {
+                let body
+                try { body = await res.json() } catch {}
+                throw new MikserError(res.status, res.statusText, body, url.toString())
+            }
+            if (!res.body) throw new Error('watch: response has no body — server may not support streaming')
+
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            try {
+                while (true) {
+                    const { done, value } = await reader.read()
+                    if (done) return
+                    buffer += decoder.decode(value, { stream: true })
+                    let sep
+                    while ((sep = buffer.indexOf('\n\n')) >= 0) {
+                        const raw = buffer.slice(0, sep)
+                        buffer = buffer.slice(sep + 2)
+                        const event = parseSseEvent(raw)
+                        if (event) yield event
+                    }
+                }
+            } finally {
+                try { reader.cancel() } catch {}
             }
         }
 
@@ -211,7 +285,7 @@ export function createClient({
             return res.arrayBuffer()
         }
 
-        return { list, query: list, urlFor, pages, update, delete: remove, render }
+        return { list, query: list, urlFor, pages, watch, update, delete: remove, render }
     }
 
     return { entities }
