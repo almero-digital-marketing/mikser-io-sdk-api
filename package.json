@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-sdk-api",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Client SDK for mikser-io's api plugin — query the document catalog from the browser or Node",
   "main": "index.js",
   "types": "index.d.ts",
@@ -14,6 +14,7 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "src",
     "README.md",
     "LICENSE"
   ],
