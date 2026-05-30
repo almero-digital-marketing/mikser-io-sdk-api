@@ -146,7 +146,7 @@ for await (const env of docs.pages({ filter: { type: 'document' }, limit: 50 }))
 
 ### `watch(query, { signal })` — live subscription via SSE
 
-Open a Server-Sent Events stream and yield events as matching entities change. Composes with `list()` — call once for the initial snapshot, then `watch()` for forward updates.
+Open a Server-Sent Events stream and yield events as matching entities change. The lowest-level real-time primitive — useful when you want raw events.
 
 ```js
 const ac = new AbortController()
@@ -173,6 +173,42 @@ for await (const event of docs.watch(
 Events fire on **every** server process cycle — both file-watcher–driven changes (the editor saving a file, decap committing) and programmatic writes (`update()` / `delete()` via this SDK). No second mechanism to wire up.
 
 Requires the endpoint to include `subscribe` in its `operations`. Public endpoints don't get it by default (each connection holds resources); token-gated endpoints do.
+
+For framework integration, prefer `live()` below — it handles the list+watch composition with race-safe cleanup.
+
+### `live(filter, onChange, options)` — list + watch in one callback
+
+The higher-level real-time primitive. Calls `onChange(items)` with the initial snapshot, then again with the patched array on every create/update/delete event. Returns a dispose function.
+
+```js
+const dispose = docs.live(
+    { 'meta.published': true, type: 'document' },
+    items => setItems(items),
+    {
+        sort:    { 'meta.date': -1 },
+        fields:  ['id', 'meta.title', 'meta.date', 'meta.summary'],
+        limit:   20,
+        signal:  abortController?.signal,    // optional external abort
+        onError: err => console.error(err),  // optional error sink
+    },
+)
+
+// Later:
+dispose()
+```
+
+Equivalent to:
+
+```js
+// 1. await list({ filter, sort, fields, limit, skip })
+// 2. onChange(items)
+// 3. for await (event of watch({ filter })) patch + onChange
+// 4. abort on dispose
+```
+
+…but with race-safe cleanup (no `mounted` flag needed in caller code), unified error routing via `onError`, and a single dispose path. This is the building block the framework adapters in [**Recipes**](#recipes--composing-real-time-and-search) use.
+
+`live()` keeps an internal `items` array, patches it on each event, and hands the whole array to `onChange` every time. That's the simplest contract for React-style frameworks (the callback can replace state). If you need per-event deltas — animated reveals, audit logs, derived counters — use `watch()` directly.
 
 ### `update(payload)` / `delete(payload)` — writes
 
@@ -407,9 +443,9 @@ Two SDKs, one mental model, one server. The vector store gives you ranked semant
 
 ### Framework integration
 
-Every framework wants the same shape: start the subscription on mount, abort it on unmount. Below — the same `useLiveEntities` / `liveEntities` helper in React, Vue 3, and Svelte. The SDK is framework-agnostic; `AbortController` is the universal cleanup primitive.
+All the boilerplate (initial fetch, watch loop, race-safe cleanup) lives inside `docs.live()`. The framework adapters are ~5 lines each — they just give the SDK a callback and call dispose on unmount.
 
-The shared module — used by every variant below — wires the client once and exports it:
+The shared module — used by every variant below — wires the client once:
 
 ```js
 // mikser.js — single source of truth for the configured client
@@ -425,29 +461,12 @@ export const docs = createClient({ baseUrl: 'https://cms.example.com' })
 import { useEffect, useState } from 'react'
 import { docs } from './mikser'
 
-export function useLiveEntities(filter) {
+export function useLiveEntities(filter, options) {
     const [items, setItems] = useState([])
-
-    useEffect(() => {
-        const ac = new AbortController()
-        let mounted = true
-
-        docs.list({ filter }).then(({ items }) => {
-            if (mounted) setItems(items)
-        })
-
-        ;(async () => {
-            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
-                if (!mounted) return
-                if (event.type === 'create') setItems(prev => [...prev, event.entity])
-                if (event.type === 'update') setItems(prev => prev.map(i => i.id === event.id ? event.entity : i))
-                if (event.type === 'delete') setItems(prev => prev.filter(i => i.id !== event.id))
-            }
-        })()
-
-        return () => { mounted = false; ac.abort() }
-    }, [JSON.stringify(filter)])
-
+    useEffect(
+        () => docs.live(filter, setItems, options),  // returns dispose
+        [JSON.stringify(filter)],
+    )
     return items
 }
 ```
@@ -457,11 +476,10 @@ export function useLiveEntities(filter) {
 import { useLiveEntities } from './useLiveEntities'
 
 export function ArticleList() {
-    const articles = useLiveEntities({
-        type: 'document',
-        'meta.collection': 'articles',
-        'meta.published':  true,
-    })
+    const articles = useLiveEntities(
+        { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
+        { sort: { 'meta.date': -1 }, limit: 20 },
+    )
     return (
         <ul>
             {articles.map(a => <li key={a.id}>{a.meta.title}</li>)}
@@ -477,28 +495,11 @@ export function ArticleList() {
 import { ref, onMounted, onUnmounted } from 'vue'
 import { docs } from './mikser'
 
-export function useLiveEntities(filter) {
+export function useLiveEntities(filter, options) {
     const items = ref([])
-    let ac
-
-    onMounted(() => {
-        ac = new AbortController()
-
-        docs.list({ filter }).then(({ items: initial }) => {
-            items.value = initial
-        })
-
-        ;(async () => {
-            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
-                if (event.type === 'create') items.value = [...items.value, event.entity]
-                if (event.type === 'update') items.value = items.value.map(i => i.id === event.id ? event.entity : i)
-                if (event.type === 'delete') items.value = items.value.filter(i => i.id !== event.id)
-            }
-        })()
-    })
-
-    onUnmounted(() => ac?.abort())
-
+    let dispose
+    onMounted (() => { dispose = docs.live(filter, v => items.value = v, options) })
+    onUnmounted(() => dispose?.())
     return { items }
 }
 ```
@@ -508,11 +509,10 @@ export function useLiveEntities(filter) {
 <script setup>
 import { useLiveEntities } from './useLiveEntities'
 
-const { items: articles } = useLiveEntities({
-    type: 'document',
-    'meta.collection': 'articles',
-    'meta.published':  true,
-})
+const { items: articles } = useLiveEntities(
+    { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
+    { sort: { 'meta.date': -1 }, limit: 20 },
+)
 </script>
 
 <template>
@@ -524,30 +524,15 @@ const { items: articles } = useLiveEntities({
 
 #### Svelte (writable store — works in Svelte 3, 4, and 5)
 
-Svelte's `writable(initial, start)` pattern is the cleanest fit: pass a `start` function that returns a `stop` function. Svelte calls `start` automatically when the store gains its first subscriber and `stop` when it loses its last one — mount / unmount lifecycle handled for free.
+Svelte's `writable(initial, start)` pattern is a perfect fit: `start` runs when the store gains its first subscriber and the returned `stop` runs when the last one disappears. The store lifecycle and `live()`'s dispose function line up exactly.
 
 ```js
 // liveEntities.js
 import { writable } from 'svelte/store'
 import { docs } from './mikser'
 
-export function liveEntities(filter) {
-    return writable([], (set, update) => {
-        const ac = new AbortController()
-
-        docs.list({ filter }).then(({ items }) => set(items))
-
-        ;(async () => {
-            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
-                if (event.type === 'create') update(items => [...items, event.entity])
-                if (event.type === 'update') update(items => items.map(i => i.id === event.id ? event.entity : i))
-                if (event.type === 'delete') update(items => items.filter(i => i.id !== event.id))
-            }
-        })()
-
-        // Returned cleanup runs when the last subscriber disappears.
-        return () => ac.abort()
-    })
+export function liveEntities(filter, options) {
+    return writable([], (set) => docs.live(filter, set, options))
 }
 ```
 
@@ -556,11 +541,10 @@ export function liveEntities(filter) {
 <script>
     import { liveEntities } from './liveEntities'
 
-    const articles = liveEntities({
-        type: 'document',
-        'meta.collection': 'articles',
-        'meta.published':  true,
-    })
+    const articles = liveEntities(
+        { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
+        { sort: { 'meta.date': -1 }, limit: 20 },
+    )
 </script>
 
 <ul>
@@ -570,7 +554,7 @@ export function liveEntities(filter) {
 </ul>
 ```
 
-If you're on Svelte 5 and prefer runes over stores, the same flow with `$state` + `onMount`:
+If you're on Svelte 5 and prefer runes over stores:
 
 ```svelte
 <!-- ArticleList.svelte (Svelte 5 runes) -->
@@ -581,21 +565,9 @@ If you're on Svelte 5 and prefer runes over stores, the same flow with `$state` 
     let articles = $state([])
     const filter = { type: 'document', 'meta.collection': 'articles', 'meta.published': true }
 
-    onMount(() => {
-        const ac = new AbortController()
-
-        docs.list({ filter }).then(({ items }) => { articles = items })
-
-        ;(async () => {
-            for await (const event of docs.watch({ filter }, { signal: ac.signal })) {
-                if (event.type === 'create') articles = [...articles, event.entity]
-                if (event.type === 'update') articles = articles.map(i => i.id === event.id ? event.entity : i)
-                if (event.type === 'delete') articles = articles.filter(i => i.id !== event.id)
-            }
-        })()
-
-        return () => ac.abort()
-    })
+    onMount(() => docs.live(filter, v => articles = v, {
+        sort: { 'meta.date': -1 }, limit: 20,
+    }))
 </script>
 
 <ul>
@@ -605,14 +577,7 @@ If you're on Svelte 5 and prefer runes over stores, the same flow with `$state` 
 </ul>
 ```
 
-Notice the identical body across all three (and both Svelte variants):
-
-1. Take `filter` as input.
-2. On mount: `list()` once, then start the `watch()` iterator in the background.
-3. Patch local state on each `create` / `update` / `delete` event.
-4. On unmount: `AbortController.abort()` — the iterator exits, the server-side subscription is cleaned up.
-
-The same skeleton works for Solid (`createSignal` + `onCleanup`), Qwik (`useTask$`), or vanilla JS (anywhere with mount/unmount hooks). The SDK doesn't care.
+The same shape adapts to Solid (`createSignal` + `onCleanup`), Qwik (`useTask$`), or vanilla JS — anywhere with a setup-and-cleanup lifecycle. The SDK doesn't care.
 
 ## Configure
 

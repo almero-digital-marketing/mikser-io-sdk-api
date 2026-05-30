@@ -205,6 +205,17 @@ export function createClient({
             }
             if (!res.body) throw new Error('watch: response has no body — server may not support streaming')
 
+            // Fetch internally creates a body-stream cancel promise when
+            // the abort signal fires. Nothing in user code awaits it, so
+            // it surfaces as an unhandled rejection. Pre-attach a no-op
+            // catch via a body.cancel() the moment we see the abort —
+            // makes that internal promise handled.
+            if (signal) {
+                signal.addEventListener('abort', () => {
+                    try { res.body.cancel().catch(() => {}) } catch {}
+                }, { once: true })
+            }
+
             const reader = res.body.getReader()
             const decoder = new TextDecoder()
             let buffer = ''
@@ -222,7 +233,94 @@ export function createClient({
                     }
                 }
             } finally {
-                try { reader.cancel() } catch {}
+                try { reader.cancel().catch(() => {}) } catch {}
+            }
+        }
+
+        /**
+         * live() — list-and-watch composed into one callback-driven view.
+         * Calls onChange(items) with the initial result, then again with
+         * the patched array on every create / update / delete event.
+         * Returns a dispose function — call it to stop the subscription.
+         *
+         * Equivalent to:
+         *   1. await list({ filter, sort, fields, limit, skip })
+         *   2. onChange(items)
+         *   3. for await (event of watch({ filter })) patch + onChange
+         *   4. abort on dispose
+         *
+         * but with race-safe cleanup, no `mounted` flag in caller code,
+         * and unified error routing via onError.
+         *
+         * @param {Object} filter   sift filter (same shape as list/watch)
+         * @param {(items: any[]) => void} onChange
+         * @param {Object} [options]
+         * @param {Object} [options.sort]   passed to the initial list()
+         * @param {string[]} [options.fields]   passed to the initial list()
+         * @param {number} [options.limit]  passed to the initial list()
+         * @param {number} [options.skip]   passed to the initial list()
+         * @param {AbortSignal} [options.signal]  external abort (forwarded
+         *                                        into our controller)
+         * @param {(err: unknown) => void} [options.onError]  error sink;
+         *                                        defaults to console.error
+         * @returns {() => void} dispose
+         */
+        function live(filter, onChange, options = {}) {
+            const {
+                sort, fields, limit, skip,
+                signal: externalSignal,
+                onError = (err) => console.error('mikser-io-sdk-api live error:', err),
+            } = options
+
+            const ac = new AbortController()
+            if (externalSignal) {
+                if (externalSignal.aborted) ac.abort()
+                else externalSignal.addEventListener('abort', () => ac.abort(), { once: true })
+            }
+
+            let items = []
+            let disposed = false
+
+            const loop = (async () => {
+                try {
+                    const env = await list({ filter, sort, fields, limit, skip })
+                    if (disposed || ac.signal.aborted) return
+                    items = env.items
+                    onChange(items)
+
+                    for await (const event of watch({ filter }, { signal: ac.signal })) {
+                        if (disposed) return
+                        switch (event.type) {
+                            case 'create':
+                                items = [...items, event.entity]
+                                onChange(items)
+                                break
+                            case 'update':
+                                items = items.map(i => i.id === event.id ? event.entity : i)
+                                onChange(items)
+                                break
+                            case 'delete':
+                                items = items.filter(i => i.id !== event.id)
+                                onChange(items)
+                                break
+                            // 'init' / 'heartbeat' — no-op for the live view
+                        }
+                    }
+                } catch (err) {
+                    if (disposed || ac.signal.aborted) return
+                    if (err?.name === 'AbortError') return
+                    try { onError(err) } catch { /* swallow handler errors */ }
+                }
+            })()
+            // Safety net: any error escaping the IIFE (rare, e.g. a
+            // late AbortError from a fetch unwind that beats the
+            // disposed check) gets swallowed silently rather than
+            // surfacing as an unhandled rejection.
+            loop.catch(() => {})
+
+            return function dispose() {
+                disposed = true
+                try { ac.abort() } catch { /* abort never normally throws, but stay defensive */ }
             }
         }
 
@@ -285,7 +383,7 @@ export function createClient({
             return res.arrayBuffer()
         }
 
-        return { list, query: list, urlFor, pages, watch, update, delete: remove, render }
+        return { list, query: list, urlFor, pages, watch, live, update, delete: remove, render }
     }
 
     return { entities }

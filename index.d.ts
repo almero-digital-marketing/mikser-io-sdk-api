@@ -93,6 +93,21 @@ export interface WatchOptions {
     signal?: AbortSignal
 }
 
+export interface LiveOptions {
+    /** Sort applied to the initial list(); not re-applied to live updates. */
+    sort?: Record<string, 1 | -1>
+    /** Field projection for the initial list(). */
+    fields?: string[]
+    /** Page size for the initial list(). */
+    limit?: number
+    /** Skip for the initial list(). */
+    skip?: number
+    /** External AbortSignal — calling abort() stops the live view. */
+    signal?: AbortSignal
+    /** Error sink. Defaults to console.error. */
+    onError?: (err: unknown) => void
+}
+
 export interface EntitiesClient {
     /** POST /entities/query — body-based, supports any sift filter. */
     list<T = unknown>(query?: ListQuery): Promise<ListEnvelope<T>>
@@ -107,6 +122,16 @@ export interface EntitiesClient {
      * Compose with list() for initial state, then watch() for updates.
      */
     watch<T = unknown>(query?: ListQuery, options?: WatchOptions): AsyncGenerator<WatchEvent<T>>
+    /**
+     * list-and-watch composed: calls onChange(items) with the initial
+     * result, then again on every change. Returns a dispose function.
+     * The race-safe building block for framework-side hooks.
+     */
+    live<T = unknown>(
+        filter: Filter,
+        onChange: (items: T[]) => void,
+        options?: LiveOptions,
+    ): () => void
     /** PUT — upsert a file in a collection folder. */
     update(payload: UpdatePayload): Promise<{ ok: true }>
     /** DELETE — remove a file from a collection folder. */
