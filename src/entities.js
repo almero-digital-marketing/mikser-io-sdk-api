@@ -264,6 +264,6 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             return res.arrayBuffer()
         }
 
-        return { list, query: list, urlFor, pages, watch, live, update, delete: remove, render }
+        return { list, urlFor, pages, watch, live, update, delete: remove, render }
     }
 }

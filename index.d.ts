@@ -111,8 +111,6 @@ export interface LiveOptions {
 export interface EntitiesClient {
     /** POST /entities/query — body-based, supports any sift filter. */
     list<T = unknown>(query?: ListQuery): Promise<ListEnvelope<T>>
-    /** Alias of list — for callers who prefer `query()` semantically. */
-    query<T = unknown>(query?: ListQuery): Promise<ListEnvelope<T>>
     /** Build the GET-form URL — CDN-cacheable, sharable. */
     urlFor(query?: ListQuery): string
     /** Iterate result pages — yields each envelope until hasNext is false. */

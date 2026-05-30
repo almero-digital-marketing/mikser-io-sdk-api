@@ -97,7 +97,7 @@ Operations outside the endpoint's allowlist return `403`; missing or wrong token
 
 `mikser.entities(endpointName, { token })` returns a per-endpoint client. The endpoint name matches a key in your `api.endpoints` config on the server.
 
-### `list(query)` / `query(query)` — body-based
+### `list(query)` — body-based
 
 POSTs `/api/<endpoint>/entities/query` so any sift filter works (incl. `$and`, `$or`, regex).
 
