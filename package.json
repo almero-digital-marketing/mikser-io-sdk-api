@@ -1,0 +1,42 @@
+{
+  "name": "mikser-io-sdk-api",
+  "version": "1.0.0",
+  "description": "Client SDK for mikser-io — query the document catalog and the vector store from the browser or Node",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/almero-digital-marketing/mikser-io-sdk-api.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/almero-digital-marketing/mikser-io-sdk-api/issues"
+  },
+  "homepage": "https://github.com/almero-digital-marketing/mikser-io-sdk-api#readme",
+  "keywords": [
+    "mikser",
+    "mikser-io",
+    "sdk",
+    "client",
+    "query",
+    "vector"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
