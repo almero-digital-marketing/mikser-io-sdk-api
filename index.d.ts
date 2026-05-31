@@ -116,6 +116,13 @@ export interface EntitiesClient {
     /** Iterate result pages — yields each envelope until hasNext is false. */
     pages<T = unknown>(query?: ListQuery): AsyncGenerator<ListEnvelope<T>>
     /**
+     * One-shot: fetch every matching entity into a flat array.
+     * Auto-paginates internally; `limit` controls per-page batch size
+     * (default 1000), not total cap. Right for SSG enumeration; wrong
+     * for catalogs too large to hold in memory.
+     */
+    listAll<T = unknown>(query?: ListQuery): Promise<T[]>
+    /**
      * Open an SSE stream and yield events as matching entities change.
      * Compose with list() for initial state, then watch() for updates.
      */

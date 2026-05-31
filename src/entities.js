@@ -65,6 +65,27 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
         }
 
         /**
+         * One-shot: fetch every entity matching the filter into a flat
+         * array. Auto-paginates internally via pages() — `limit` in the
+         * query controls the per-page batch size (default 1000), not the
+         * total cap.
+         *
+         * Right when: SSG route enumeration, sitemap generation, build-
+         * time indexing — anything that needs the whole filtered set in
+         * memory at once.
+         *
+         * Wrong when: the catalog is large enough that loading all of it
+         * is wasteful. Use pages() directly and stream-process there.
+         */
+        async function listAll(query = {}) {
+            const items = []
+            for await (const env of pages({ limit: 1000, ...query })) {
+                items.push(...env.items)
+            }
+            return items
+        }
+
+        /**
          * Subscribe to changes — opens an SSE stream and yields events
          * for each matching entity change (CREATE / UPDATE / DELETE).
          * Composable with list(): call list() once for the initial state,
@@ -264,6 +285,6 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             return res.arrayBuffer()
         }
 
-        return { list, urlFor, pages, watch, live, update, delete: remove, render }
+        return { list, listAll, urlFor, pages, watch, live, update, delete: remove, render }
     }
 }

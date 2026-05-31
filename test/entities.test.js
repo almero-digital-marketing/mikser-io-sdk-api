@@ -113,6 +113,59 @@ describe('entities().urlFor', () => {
     })
 })
 
+describe('entities().listAll', () => {
+    it('flattens all pages into a single array', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [{ id: 'a' }, { id: 'b' }], page: 1, limit: 2, total: 5, hasNext: true }) }),
+            () => fakeResponse({ json: envelope({ items: [{ id: 'c' }, { id: 'd' }], page: 2, limit: 2, total: 5, hasNext: true }) }),
+            () => fakeResponse({ json: envelope({ items: [{ id: 'e' }],            page: 3, limit: 2, total: 5, hasNext: false }) }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        const items = await client.entities('public').listAll({ filter: { 'meta.published': true }, limit: 2 })
+        expect(items.map(i => i.id)).toEqual(['a', 'b', 'c', 'd', 'e'])
+        expect(fetch.calls).toHaveLength(3)
+    })
+
+    it('returns empty array when nothing matches', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [], page: 1, total: 0, hasNext: false }) }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        const items = await client.entities('public').listAll({})
+        expect(items).toEqual([])
+    })
+
+    it('defaults per-page batch to 1000 when limit is not specified', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [], hasNext: false }) }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').listAll({})
+        expect(JSON.parse(fetch.calls[0][1].body).limit).toBe(1000)
+    })
+
+    it('honors an explicit limit as per-page batch (not total cap)', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [1, 2, 3], page: 1, limit: 3, total: 6, hasNext: true }) }),
+            () => fakeResponse({ json: envelope({ items: [4, 5, 6], page: 2, limit: 3, total: 6, hasNext: false }) }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        const items = await client.entities('public').listAll({ limit: 3 })
+        expect(items).toEqual([1, 2, 3, 4, 5, 6])      // returns ALL 6, not capped at 3
+        const bodies = fetch.calls.map(([, init]) => JSON.parse(init.body))
+        expect(bodies.every(b => b.limit === 3)).toBe(true)
+    })
+
+    it('propagates a list() error', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ ok: false, status: 500, statusText: 'Server', json: { error: 'boom' } }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await expect(client.entities('public').listAll({}))
+            .rejects.toMatchObject({ name: 'MikserError', status: 500 })
+    })
+})
+
 describe('entities().pages', () => {
     it('iterates until hasNext is false', async () => {
         const fetch = scriptedFetch([
