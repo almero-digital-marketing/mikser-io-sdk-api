@@ -8,6 +8,14 @@ For semantic search against the `vector` plugin, install [mikser-io-sdk-vector](
 
 Zero dependencies. Runs anywhere `fetch` is available (modern browsers, Node 18+, Deno, Bun, Workers).
 
+> **Using Vue, React, or Svelte?** You probably want one of the framework SDKs — they wrap this package in framework-idiomatic primitives (`useDocument` / `useDocuments`, multilingual `useHref`, live SSE-driven updates) so you don't write a watch loop or lifecycle plumbing yourself:
+>
+> - [`mikser-io-sdk-vue`](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) — Vue 3 composables + vue-router integration
+> - [`mikser-io-sdk-react`](https://github.com/almero-digital-marketing/mikser-io-sdk-react) — React 18+ / 19+ hooks + React Router v6+
+> - [`mikser-io-sdk-svelte`](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) — Svelte 5 (runes) + SvelteKit
+>
+> Use **this** package directly when you're writing a custom adapter for another framework (Solid, Qwik, vanilla JS, server-side Node) or when you need the lower-level surface (`list`, `urlFor`, `watch`, `render`).
+
 ## Install
 
 ```bash
@@ -206,9 +214,9 @@ Equivalent to:
 // 4. abort on dispose
 ```
 
-…but with race-safe cleanup (no `mounted` flag needed in caller code), unified error routing via `onError`, and a single dispose path. This is the building block the framework adapters in [**Recipes**](#recipes--composing-real-time-and-search) use.
+…but with race-safe cleanup (no `mounted` flag needed in caller code), unified error routing via `onError`, and a single dispose path. This is the building block the [framework SDKs](#framework-integration) (Vue / React / Svelte) consume internally — and the surface to use directly if you're writing a custom adapter.
 
-`live()` keeps an internal `items` array, patches it on each event, and hands the whole array to `onChange` every time. That's the simplest contract for React-style frameworks (the callback can replace state). If you need per-event deltas — animated reveals, audit logs, derived counters — use `watch()` directly.
+`live()` keeps an internal `items` array, patches it on each event, and hands the whole array to `onChange` every time. That's the simplest contract for frameworks with state-replace semantics (the callback just overwrites state). If you need per-event deltas — animated reveals, audit logs, derived counters — use `watch()` directly.
 
 ### `update(payload)` / `delete(payload)` — writes
 
@@ -443,141 +451,31 @@ Two SDKs, one mental model, one server. The vector store gives you ranked semant
 
 ### Framework integration
 
-All the boilerplate (initial fetch, watch loop, race-safe cleanup) lives inside `docs.live()`. The framework adapters are ~5 lines each — they just give the SDK a callback and call dispose on unmount.
+All the boilerplate (initial fetch, watch loop, race-safe cleanup) lives inside `live()`. A framework adapter is ~5 lines — it gives the SDK a callback and calls dispose on unmount. For the three major frameworks, those adapters are already published:
 
-The shared module — used by every variant below — wires the client once:
+| Framework | Package | Primitive |
+|---|---|---|
+| Vue 3 | [`mikser-io-sdk-vue`](https://github.com/almero-digital-marketing/mikser-io-sdk-vue) | `useDocument(id)` / `useDocuments(query)` returning Vue refs; vue-router integration via `createMikserRouter` |
+| React 18+ / 19+ | [`mikser-io-sdk-react`](https://github.com/almero-digital-marketing/mikser-io-sdk-react) | `useDocument(id)` / `useDocuments(query)` hooks; React Router integration via `useMikserRoutes` → `useRoutes` |
+| Svelte 5 | [`mikser-io-sdk-svelte`](https://github.com/almero-digital-marketing/mikser-io-sdk-svelte) | `useDocument(() => id)` / `useDocuments(() => query)` runes-backed reactives; SvelteKit `entries()` integration via `generateMikserRoutes` |
 
-```js
-// mikser.js — single source of truth for the configured client
-import { createClient } from 'mikser-io-sdk-api'
-export const docs = createClient({ baseUrl: 'https://cms.example.com' })
-    .entities('public')
-```
+All three share the same conceptual surface — single-document subscription, list subscription, multilingual `useHref` / `useAlternates`, asset resolution via `useAsset` — wrapped in each framework's idiomatic shape. They all peer-depend on this package and consume `live()` internally; nothing about their behaviour is duplicated logic. If you have one of those three frameworks, prefer the matching SDK over hand-rolling against `live()`.
 
-#### React (hook)
-
-```js
-// useLiveEntities.js
-import { useEffect, useState } from 'react'
-import { docs } from './mikser'
-
-export function useLiveEntities(filter, options) {
-    const [items, setItems] = useState([])
-    useEffect(
-        () => docs.live(filter, setItems, options),  // returns dispose
-        [JSON.stringify(filter)],
-    )
-    return items
-}
-```
-
-```jsx
-// ArticleList.jsx
-import { useLiveEntities } from './useLiveEntities'
-
-export function ArticleList() {
-    const articles = useLiveEntities(
-        { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
-        { sort: { 'meta.date': -1 }, limit: 20 },
-    )
-    return (
-        <ul>
-            {articles.map(a => <li key={a.id}>{a.meta.title}</li>)}
-        </ul>
-    )
-}
-```
-
-#### Vue 3 (composable, Composition API)
+The shape adapts to **any** framework with a setup-and-cleanup lifecycle — Solid (`createSignal` + `onCleanup`), Qwik (`useTask$`), Lit, or vanilla JS. For those, the adapter pattern is the same five lines: instantiate state, call `live(filter, setState)`, store the returned `dispose`, call it on teardown.
 
 ```js
-// useLiveEntities.js
-import { ref, onMounted, onUnmounted } from 'vue'
-import { docs } from './mikser'
+// vanilla adapter shape — works in any environment
+const documents = createClient({ baseUrl }).entities('public')
 
-export function useLiveEntities(filter, options) {
-    const items = ref([])
-    let dispose
-    onMounted (() => { dispose = docs.live(filter, v => items.value = v, options) })
-    onUnmounted(() => dispose?.())
-    return { items }
-}
-```
-
-```vue
-<!-- ArticleList.vue -->
-<script setup>
-import { useLiveEntities } from './useLiveEntities'
-
-const { items: articles } = useLiveEntities(
-    { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
+const dispose = documents.live(
+    { 'meta.published': true },
+    (items) => render(items),               // your update callback
     { sort: { 'meta.date': -1 }, limit: 20 },
 )
-</script>
 
-<template>
-    <ul>
-        <li v-for="a in articles" :key="a.id">{{ a.meta.title }}</li>
-    </ul>
-</template>
+// later, on teardown
+dispose()
 ```
-
-#### Svelte (writable store — works in Svelte 3, 4, and 5)
-
-Svelte's `writable(initial, start)` pattern is a perfect fit: `start` runs when the store gains its first subscriber and the returned `stop` runs when the last one disappears. The store lifecycle and `live()`'s dispose function line up exactly.
-
-```js
-// liveEntities.js
-import { writable } from 'svelte/store'
-import { docs } from './mikser'
-
-export function liveEntities(filter, options) {
-    return writable([], (set) => docs.live(filter, set, options))
-}
-```
-
-```svelte
-<!-- ArticleList.svelte -->
-<script>
-    import { liveEntities } from './liveEntities'
-
-    const articles = liveEntities(
-        { type: 'document', 'meta.collection': 'articles', 'meta.published': true },
-        { sort: { 'meta.date': -1 }, limit: 20 },
-    )
-</script>
-
-<ul>
-    {#each $articles as a (a.id)}
-        <li>{a.meta.title}</li>
-    {/each}
-</ul>
-```
-
-If you're on Svelte 5 and prefer runes over stores:
-
-```svelte
-<!-- ArticleList.svelte (Svelte 5 runes) -->
-<script>
-    import { onMount } from 'svelte'
-    import { docs } from './mikser'
-
-    let articles = $state([])
-    const filter = { type: 'document', 'meta.collection': 'articles', 'meta.published': true }
-
-    onMount(() => docs.live(filter, v => articles = v, {
-        sort: { 'meta.date': -1 }, limit: 20,
-    }))
-</script>
-
-<ul>
-    {#each articles as a (a.id)}
-        <li>{a.meta.title}</li>
-    {/each}
-</ul>
-```
-
-The same shape adapts to Solid (`createSignal` + `onCleanup`), Qwik (`useTask$`), or vanilla JS — anywhere with a setup-and-cleanup lifecycle. The SDK doesn't care.
 
 ## Configure
 
