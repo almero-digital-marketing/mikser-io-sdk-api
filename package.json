@@ -18,7 +18,13 @@
     "README.md",
     "LICENSE"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/almero-digital-marketing/mikser-io-sdk-api.git"
