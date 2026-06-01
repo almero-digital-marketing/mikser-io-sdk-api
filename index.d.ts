@@ -16,6 +16,29 @@ export interface ClientOptions {
 export interface EntityOptions {
     /** Bearer token sent on every request to this endpoint. */
     token?: string
+    /**
+     * URL (relative to baseUrl or absolute) of a pre-built static JSON
+     * snapshot of the entity set — typically produced by the `data`
+     * plugin's `catalog.<name>` output. When set:
+     *   - `live()` fires `onChange` with the snapshot first, then
+     *     opens the SSE subscribe stream
+     *   - `listAll()` returns the snapshot directly when the query is
+     *     trivial (no filter / sort / skip)
+     *
+     * The snapshot fast path is the CDN-cacheable first-paint
+     * optimisation: zero API roundtrip, no SSE-latency tax on boot.
+     * Align the data plugin's catalog filter with your live() filter
+     * so the initial state matches what SSE will send.
+     */
+    initialUrl?: string
+    /**
+     * When the snapshot fetch fails (404 in dev, network error,
+     * unrecognised shape), default behaviour is to silently fall
+     * back to a fresh `list()` call. Set false for production
+     * environments where you require the snapshot to be present.
+     * @default true
+     */
+    fallbackToList?: boolean
 }
 
 /**

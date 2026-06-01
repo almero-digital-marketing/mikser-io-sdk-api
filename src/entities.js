@@ -8,12 +8,72 @@ import { joinUrl, sortToParam, filterToParams } from './url.js'
 import { parseSseEvent } from './sse.js'
 
 export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, headers: defaultHeaders }) {
-    return function entities(name, { token } = {}) {
+    return function entities(name, opts = {}) {
+        const {
+            token,
+            // initialUrl: optional URL (relative to baseUrl or absolute) for a
+            // pre-built static JSON snapshot — typically produced by the
+            // `data` plugin's catalog.<name> output. When set, live() fires
+            // onChange with the snapshot immediately, then opens the SSE
+            // subscribe stream as usual. listAll() also consults the
+            // snapshot before falling back to paginated list calls.
+            //
+            // The fetched JSON is unwrapped automatically — the data
+            // plugin emits `[{ refId, name, date, data }, ...]`; we
+            // return the `.data` payloads. Plain arrays and { items }
+            // envelopes are passed through unchanged.
+            //
+            // Pre-built snapshots are the fast first-paint path:
+            // CDN-cached, no API roundtrip, no SSE latency tax on boot.
+            // Pair the snapshot's data-plugin filter with your live()
+            // filter so the initial state matches what SSE will send.
+            initialUrl,
+            // When initialUrl fetch fails (404 in dev, network error,
+            // wrong shape), default behavior is to log and fall back to
+            // a fresh list() call — keeps dev mode trivial. Set false
+            // for environments where you require the snapshot.
+            fallbackToList = true,
+        } = opts
         const endpointBase = `${basePath}/${name}`
         const queryUrl     = joinUrl(baseUrl, `${endpointBase}/entities/query`)
         const listUrl      = joinUrl(baseUrl, `${endpointBase}/entities`)
         const subscribeUrl = joinUrl(baseUrl, `${endpointBase}/entities/subscribe`)
         const renderUrl    = joinUrl(baseUrl, `${endpointBase}/render`)
+
+        const resolvedInitialUrl = initialUrl
+            ? (/^https?:\/\//.test(initialUrl) ? initialUrl : joinUrl(baseUrl, initialUrl))
+            : null
+
+        // Cached snapshot promise — concurrent live() / listAll() calls
+        // share one fetch. Cleared on error so a flaky connection can
+        // recover on the next call.
+        let snapshotPromise = null
+        async function loadSnapshot() {
+            if (!resolvedInitialUrl) return null
+            if (snapshotPromise) return snapshotPromise
+            snapshotPromise = (async () => {
+                try {
+                    const res = await doFetch(resolvedInitialUrl, {
+                        method: 'GET',
+                        headers: { accept: 'application/json', ...defaultHeaders },
+                    })
+                    if (!res.ok) {
+                        if (!fallbackToList) {
+                            throw new MikserError(res.status, res.statusText, null, resolvedInitialUrl)
+                        }
+                        return null
+                    }
+                    const payload = await res.json()
+                    return unwrapSnapshot(payload)
+                } catch (err) {
+                    // Clear the cached promise so the next call can retry.
+                    snapshotPromise = null
+                    if (!fallbackToList) throw err
+                    return null
+                }
+            })()
+            return snapshotPromise
+        }
 
         /**
          * Body-based query. Send everything sift accepts —
@@ -78,6 +138,21 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
          * is wasteful. Use pages() directly and stream-process there.
          */
         async function listAll(query = {}) {
+            // Snapshot fast path: if no filter/sort/skip is requested
+            // beyond what the snapshot was built with, return the
+            // pre-built array directly. The caller's filter/sort would
+            // require re-querying the live endpoint anyway, so any
+            // non-trivial query falls through to the paginated fetch.
+            const trivial = !query.filter && !query.sort && !query.skip
+            if (trivial && resolvedInitialUrl) {
+                const snapshot = await loadSnapshot()
+                if (snapshot) {
+                    return query.fields
+                        ? snapshot.map(item => pickFields(item, query.fields))
+                        : snapshot
+                }
+                // Snapshot unavailable — fall through to paginated fetch.
+            }
             const items = []
             for await (const env of pages({ limit: 1000, ...query })) {
                 items.push(...env.items)
@@ -185,10 +260,28 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
 
             const loop = (async () => {
                 try {
-                    const env = await list({ filter, sort, fields, limit, skip })
-                    if (disposed || ac.signal.aborted) return
-                    items = env.items
-                    onChange(items)
+                    // Snapshot fast path. Use it only when the caller's
+                    // query is trivial enough that the pre-built array
+                    // reflects what list() would return — anything more
+                    // specific (filter, sort, skip) goes through list()
+                    // so the caller's intent is honored.
+                    let usedSnapshot = false
+                    const trivial = !filter && !sort && !skip
+                    if (trivial && resolvedInitialUrl) {
+                        const snapshot = await loadSnapshot()
+                        if (snapshot) {
+                            if (disposed || ac.signal.aborted) return
+                            items = fields ? snapshot.map(i => pickFields(i, fields)) : snapshot
+                            onChange(items)
+                            usedSnapshot = true
+                        }
+                    }
+                    if (!usedSnapshot) {
+                        const env = await list({ filter, sort, fields, limit, skip })
+                        if (disposed || ac.signal.aborted) return
+                        items = env.items
+                        onChange(items)
+                    }
 
                     for await (const event of watch({ filter }, { signal: ac.signal })) {
                         if (disposed) return
@@ -287,4 +380,57 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
 
         return { list, listAll, urlFor, pages, watch, live, update, delete: remove, render }
     }
+}
+
+// Unwrap a snapshot payload into a plain array of entity-like objects.
+// Recognises three shapes:
+//   - data-plugin catalog output:  [{ refId, name, date, data }, ...]
+//   - plain array of entities:     [{ id, meta, ... }, ...]
+//   - list() envelope:             { items: [...], page, ... }
+// Returns null on unrecognised shapes so the caller can decide to fall
+// back to a fresh list() call (when fallbackToList is true).
+function unwrapSnapshot(payload) {
+    if (Array.isArray(payload)) {
+        if (payload.length === 0) return []
+        // Heuristic: data-plugin entries have `refId` + `data`; treat any
+        // object with `data` as a wrapped entry and unwrap. Anything else
+        // is a plain array.
+        if (payload[0] && typeof payload[0] === 'object' && 'data' in payload[0]) {
+            return payload.map(entry => entry.data).filter(Boolean)
+        }
+        return payload
+    }
+    if (payload && typeof payload === 'object' && Array.isArray(payload.items)) {
+        return payload.items
+    }
+    return null
+}
+
+// Project an entity object to only the fields requested. Dotted paths
+// supported ("meta.title" → object with `meta.title` set, other meta
+// keys dropped). Used by the snapshot fast paths in list/live so a
+// caller asking for narrow fields still gets narrow data from the
+// snapshot — saves a re-fetch and keeps memory/bundles smaller.
+function pickFields(entity, fields) {
+    const out = {}
+    for (const field of fields) {
+        const parts = field.split('.')
+        let src = entity, dst = out
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i]
+            if (src == null || typeof src !== 'object') { src = undefined; break }
+            src = src[part]
+            if (dst[part] == null || typeof dst[part] !== 'object') dst[part] = {}
+            dst = dst[part]
+        }
+        if (src !== undefined) {
+            const last = parts[parts.length - 1]
+            if (src != null && typeof src === 'object' && last in src) {
+                dst[last] = src[last]
+            } else if (parts.length === 1 && entity[last] !== undefined) {
+                out[last] = entity[last]
+            }
+        }
+    }
+    return out
 }
