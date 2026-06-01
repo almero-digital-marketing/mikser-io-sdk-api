@@ -113,9 +113,9 @@ Operations outside the endpoint's allowlist return `403`; missing or wrong token
 
 ### `initialUrl` — pair with the `data` plugin for fast first paint
 
-If you have a known, predictable query that runs on every page load — the canonical example is the **route table for an SPA** — paying an API round-trip for it on first paint is wasted work. The right shape is to publish that data as a static file at build/finalize time and have the SDK pick it up.
+If you have a known, predictable query that runs on every page load — a route table for an SPA, a navigation menu, a category list — paying an API round-trip for it on first paint is wasted work. The right shape is to publish that data as a static file at build/finalize time and have the SDK pick it up.
 
-Mikser's `data` plugin does the publishing side. A `catalog.<name>` entry writes one JSON file per name under `out/data/`:
+Mikser's `data` plugin does the publishing side. A `catalog.<name>` entry writes one JSON file per name under `out/data/`; `<name>` is whatever you want to call it — name it after the role the snapshot plays in your app (`sitemap`, `menu`, `tags`, `categories`, etc.). Example for a router-driving snapshot:
 
 ```js
 // mikser.config.js
@@ -124,7 +124,8 @@ plugins: ['documents', 'front-matter', 'data', 'api', /* ... */],
 data: {
     catalog: {
         // out/data/sitemap.json — one entry per published, component-having
-        // document, projected to just the routing fields.
+        // document, projected to just the routing fields. `sitemap` is the
+        // catalog-entry name; the SDK below uses the matching URL path.
         sitemap: {
             query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
             pick: ['id', 'destination', 'meta.component', 'meta.route', 'meta.title'],
@@ -143,7 +144,7 @@ api: {
 },
 ```
 
-On the client, point `entities()` at the same file:
+On the client, point `entities()` at the matching file. The URL path mirrors the catalog name: `data.catalog.sitemap` → `/data/sitemap.json`, `data.catalog.menu` → `/data/menu.json`, and so on.
 
 ```js
 const documents = createClient({ baseUrl: 'https://cms.example.com' })
@@ -159,6 +160,22 @@ What `initialUrl` changes:
 The data plugin emits each entry as `{ refId, name, date, data: {...picked} }`. The SDK strips that wrapper automatically and hands `onChange` / `listAll` a plain array of the `data` payloads, so a static snapshot looks identical to a live response.
 
 This is **not** a cache. The snapshot is only consulted for the initial fill; ongoing changes come over SSE on the actual API endpoint. For runtime fail-safety on per-id reads, that's what the api plugin's `cache: true` is for — see [mikser-io's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md).
+
+### Dev-mode warning: accidentally wide queries
+
+The common failure mode for a CMS-backed app is "I just wanted a nav menu but pulled every full document over the wire." To catch it at write time, `list()` and `live()` emit a one-time dev-mode `console.warn` when a response has more than 50 items and the query has no `fields:` projection:
+
+```
+[mikser-sdk] list() returned 247 items (~4.2 MB) from "public" with no `fields` projection.
+  Add { fields: [...] } to narrow it, or — if this query runs on every page load —
+  move it to a `data.catalog.<name>` snapshot on the mikser side and load via:
+    entities('public', { initialUrl: '/data/<name>.json' })
+  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.
+```
+
+The warning is deduped per `(endpoint, filter, sort)` shape, so an SSE-driven list that updates 30 times only fires once. It's silenced when `process.env.NODE_ENV === 'production'`, when `MIKSER_QUIET` is set, or per-call via `{ quiet: true }` on `list(query, opts)` / `live(filter, onChange, opts)`.
+
+The mikser-io server emits a matching warning in its logs for the same shape — useful when the wide query came from curl, another SDK, or an environment where `console` isn't visible.
 
 ### `list(query)` — body-based
 

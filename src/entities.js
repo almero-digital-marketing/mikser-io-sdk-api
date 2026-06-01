@@ -14,6 +14,54 @@ import { parseSseEvent } from './sse.js'
 // to POST automatically.
 const GET_MAX_URL = 1800
 
+// Wide-list warning — surfaces in dev mode when a list/live call
+// returns more than this without a `fields` projection. Catches the
+// common "I just wanted a nav menu but pulled every full document"
+// failure mode at the first place it manifests (developer's DevTools
+// console). Server-side has a matching warning that fires for all
+// clients regardless of SDK use.
+const WIDE_RESPONSE_ITEMS = 50
+const _warnedShapes = new Set()
+
+function isProductionEnv() {
+    try {
+        return typeof process !== 'undefined'
+            && process.env?.NODE_ENV === 'production'
+    } catch { return false }
+}
+function isQuiet() {
+    try {
+        return typeof process !== 'undefined' && process.env?.MIKSER_QUIET
+    } catch { return false }
+}
+
+function maybeWarnWide({ endpoint, query, envelopeOrItems, quiet }) {
+    if (quiet || isProductionEnv() || isQuiet()) return
+    const items = Array.isArray(envelopeOrItems)
+        ? envelopeOrItems
+        : envelopeOrItems?.items
+    if (!Array.isArray(items) || items.length <= WIDE_RESPONSE_ITEMS) return
+    const hasFields = Array.isArray(query?.fields) && query.fields.length > 0
+    if (hasFields) return
+    const shape = `${endpoint}|${JSON.stringify(query?.filter ?? null)}|${JSON.stringify(query?.sort ?? null)}`
+    if (_warnedShapes.has(shape)) return
+    _warnedShapes.add(shape)
+    let sizeNote = ''
+    try {
+        const bytes = JSON.stringify(items).length
+        sizeNote = bytes >= 1024 * 1024
+            ? ` (~${(bytes / 1024 / 1024).toFixed(1)} MB)`
+            : ` (~${Math.round(bytes / 1024)} KB)`
+    } catch { /* size note is best-effort */ }
+    console.warn(
+        `[mikser-sdk] list() returned ${items.length} items${sizeNote} from "${endpoint}" with no \`fields\` projection.\n` +
+        `  Add { fields: [...] } to narrow it, or — if this query runs on every page load —\n` +
+        `  move it to a \`data.catalog.<name>\` snapshot on the mikser side and load via:\n` +
+        `    entities('${endpoint}', { initialUrl: '/data/<name>.json' })\n` +
+        `  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.`,
+    )
+}
+
 export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, headers: defaultHeaders }) {
     return function entities(name, opts = {}) {
         const {
@@ -114,7 +162,9 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                             ...bearer(token),
                         },
                     })
-                    return jsonOrThrow(res, url)
+                    const envelope = await jsonOrThrow(res, url)
+                    maybeWarnWide({ endpoint: name, query, envelopeOrItems: envelope, quiet: opts.quiet })
+                    return envelope
                 }
             }
 
@@ -128,7 +178,9 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                 },
                 body: JSON.stringify(query),
             })
-            return jsonOrThrow(res, queryUrl)
+            const envelope = await jsonOrThrow(res, queryUrl)
+            maybeWarnWide({ endpoint: name, query, envelopeOrItems: envelope, quiet: opts.quiet })
+            return envelope
         }
 
         /**
@@ -283,6 +335,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
         function live(filter, onChange, options = {}) {
             const {
                 sort, fields, limit, skip,
+                quiet,
                 signal: externalSignal,
                 onError = (err) => console.error('mikser-io-sdk-api live error:', err),
             } = options
@@ -315,7 +368,13 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                         }
                     }
                     if (!usedSnapshot) {
-                        const env = await list({ filter, sort, fields, limit, skip })
+                        // Pass { quiet } so list()'s wide-warning honors
+                        // the live() caller's quiet opt. live() also
+                        // does its own snapshot-path warning below for
+                        // the case where the initial fill came from
+                        // /data/<name>.json — those callers already
+                        // opted into the narrow shape, so no warning.
+                        const env = await list({ filter, sort, fields, limit, skip }, { quiet })
                         if (disposed || ac.signal.aborted) return
                         items = env.items
                         onChange(items)
