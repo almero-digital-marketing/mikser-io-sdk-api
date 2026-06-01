@@ -7,6 +7,13 @@ import { bearer, jsonOrThrow } from './http.js'
 import { joinUrl, sortToParam, filterToParams } from './url.js'
 import { parseSseEvent } from './sse.js'
 
+// Conservative URL-length ceiling for the GET form of list(). Real
+// browsers and proxies vary (Chrome ~32k, IIS ~16k, nginx default
+// 8k, some CDNs 4k), but the safest interop floor for list-with-
+// many-filter-params is well under 2k. Queries past this fall back
+// to POST automatically.
+const GET_MAX_URL = 1800
+
 export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, headers: defaultHeaders }) {
     return function entities(name, opts = {}) {
         const {
@@ -76,11 +83,42 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
         }
 
         /**
-         * Body-based query. Send everything sift accepts —
-         * $and / $or / $regex, projections, sorts. Returns the standard
-         * envelope: { items, page, limit, total, totalPages, hasNext, hasPrev }.
+         * Run a list query. Returns the standard envelope:
+         * { items, page, limit, total, totalPages, hasNext, hasPrev }.
+         *
+         * Transport selection: tries GET first because GET responses
+         * are what the api plugin's per-query disk cache writes (and
+         * what a reverse proxy can serve as failover when mikser is
+         * down). Falls back to POST when:
+         *   - the encoded URL exceeds GET_MAX_URL (browsers and most
+         *     proxies start refusing past ~2KB; we use a conservative
+         *     limit of 1800)
+         *   - GET is explicitly disabled via opts.method = 'POST'
+         *
+         * GET can express anything sift accepts via the `.$op` URL-param
+         * suffix scheme (see urlFor). Use POST when you want to be
+         * explicit about not engaging the cache path, e.g. for queries
+         * with secrets in the body that shouldn't sit in proxy logs.
          */
-        async function list(query = {}) {
+        async function list(query = {}, opts = {}) {
+            const forcePost = opts.method === 'POST'
+
+            if (!forcePost) {
+                const url = urlFor(query)
+                if (url.length <= GET_MAX_URL) {
+                    const res = await doFetch(url, {
+                        method: 'GET',
+                        headers: {
+                            accept: 'application/json',
+                            ...defaultHeaders,
+                            ...bearer(token),
+                        },
+                    })
+                    return jsonOrThrow(res, url)
+                }
+            }
+
+            // POST fallback — long URLs and forced POST land here.
             const res = await doFetch(queryUrl, {
                 method: 'POST',
                 headers: {

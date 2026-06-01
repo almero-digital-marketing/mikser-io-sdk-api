@@ -18,17 +18,20 @@ export interface EntityOptions {
     token?: string
     /**
      * URL (relative to baseUrl or absolute) of a pre-built static JSON
-     * snapshot of the entity set — typically produced by the `data`
-     * plugin's `catalog.<name>` output. When set:
-     *   - `live()` fires `onChange` with the snapshot first, then
-     *     opens the SSE subscribe stream
-     *   - `listAll()` returns the snapshot directly when the query is
-     *     trivial (no filter / sort / skip)
+     * snapshot of the entity set. When set, `live()` and `listAll()`
+     * read from this URL on first call instead of hitting the live API.
      *
-     * The snapshot fast path is the CDN-cacheable first-paint
-     * optimisation: zero API roundtrip, no SSE-latency tax on boot.
-     * Align the data plugin's catalog filter with your live() filter
-     * so the initial state matches what SSE will send.
+     * Largely obsolete with the api plugin's per-query disk cache
+     * (mikser-io ^6.25.0) — the cache writes to the same URL the live
+     * API serves, and a reverse proxy can fail over to it transparently.
+     * Use `initialUrl` only when:
+     *   - the snapshot URL is a different host (CDN, edge cache,
+     *     pre-rendered static asset on disk)
+     *   - you want to skip the live API roundtrip on boot even when
+     *     mikser is up (microoptimization)
+     *
+     * Otherwise, just configure your reverse proxy to fail over to the
+     * cache on backend errors and the live URL Just Works.
      */
     initialUrl?: string
     /**
