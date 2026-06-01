@@ -127,7 +127,7 @@ data: {
         // document, projected to just the routing fields.
         sitemap: {
             query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
-            pick: ['id', 'destination', 'meta'],
+            pick: ['id', 'destination', 'meta.component', 'meta.route', 'meta.title'],
         },
     },
 },
