@@ -17,31 +17,36 @@ export interface EntityOptions {
     /** Bearer token sent on every request to this endpoint. */
     token?: string
     /**
-     * URL (relative to baseUrl or absolute) of a pre-built static JSON
-     * snapshot of the entity set. When set, `live()` and `listAll()`
-     * read from this URL on first call instead of hitting the live API.
+     * Mirrors the mikser-io `data` plugin's config block. The SDK
+     * consumes the static JSON files the data plugin writes under
+     * `out/data/` so first-paint reads come from disk (CDN-cacheable)
+     * instead of hitting the live API.
      *
-     * Largely obsolete with the api plugin's per-query disk cache
-     * (mikser-io ^6.25.0) — the cache writes to the same URL the live
-     * API serves, and a reverse proxy can fail over to it transparently.
-     * Use `initialUrl` only when:
-     *   - the snapshot URL is a different host (CDN, edge cache,
-     *     pre-rendered static asset on disk)
-     *   - you want to skip the live API roundtrip on boot even when
-     *     mikser is up (microoptimization)
+     * The names are the same as on the server:
+     *   - `data.catalog`  pairs with `data.catalog.<name>`  on mikser
+     *   - `data.entities` pairs with `data.entities.<name>` on mikser
      *
-     * Otherwise, just configure your reverse proxy to fail over to the
-     * cache on backend errors and the live URL Just Works.
+     * On a fetch failure the SDK silently falls back to the live API
+     * for that call — no separate flag.
      */
-    initialUrl?: string
+    data?: DataOptions
+}
+
+export interface DataOptions {
     /**
-     * When the snapshot fetch fails (404 in dev, network error,
-     * unrecognised shape), default behaviour is to silently fall
-     * back to a fresh `list()` call. Set false for production
-     * environments where you require the snapshot to be present.
-     * @default true
+     * Name of a `data.catalog.<name>` block on the server. The SDK
+     * loads `/data/<name>.json` (one combined file) on first paint;
+     * `live()` and `listAll()` consult it before hitting the API.
      */
-    fallbackToList?: boolean
+    catalog?: string
+    /**
+     * Name of a `data.entities.<name>` block on the server. When
+     * `live({id})` (the shape `useDocument` issues) fires, the SDK
+     * loads `/data/<entry.name>.<name>.json` (one file per entity)
+     * instead of calling the API. Requires `data.catalog` so the
+     * `entry.name` mapping is available.
+     */
+    entities?: string
 }
 
 /**

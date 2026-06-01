@@ -57,18 +57,18 @@ function maybeWarnWide({ endpoint, query, envelopeOrItems, quiet }) {
         `[mikser-sdk] list() returned ${items.length} items${sizeNote} from "${endpoint}" with no \`fields\` projection.\n` +
         `  Add { fields: [...] } to narrow it, or — if this query runs on every page load —\n` +
         `  move it to a \`data.catalog.<name>\` snapshot on the mikser side and load via:\n` +
-        `    entities('${endpoint}', { initialUrl: '/data/<name>.json' })\n` +
+        `    entities('${endpoint}', { data: { catalog: '<name>' } })\n` +
         `  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.`,
     )
 }
 
-// Snapshot-bypass warning — fires when `initialUrl` is configured but
-// the call is non-trivial (has filter / sort / skip), so the snapshot
-// can't be used and the SDK falls back to the live API. The bypass is
-// correct behavior, but it's silent: developers often set initialUrl
-// once and then add a sort to one of their useDocuments calls without
-// noticing the snapshot is no longer involved. Deduped per
-// (endpoint, kind, what-was-set) so a page with 3 filtered calls
+// Snapshot-bypass warning — fires when `data.catalog` is configured
+// but the call is non-trivial (has filter / sort / skip), so the
+// snapshot can't be used and the SDK falls back to the live API. The
+// bypass is correct behavior, but it's silent: developers often set
+// data.catalog once and then add a sort to one of their useDocuments
+// calls without noticing the snapshot is no longer involved. Deduped
+// per (endpoint, kind, what-was-set) so a page with 3 filtered calls
 // produces 3 warnings, not 30.
 const _bypassedShapes = new Set()
 function maybeWarnSnapshotBypass({ endpoint, kind, filter, sort, skip, quiet }) {
@@ -84,7 +84,7 @@ function maybeWarnSnapshotBypass({ endpoint, kind, filter, sort, skip, quiet }) 
     _bypassedShapes.add(shape)
     const fallback = kind === 'live' ? 'live list()' : 'paginated fetch'
     console.warn(
-        `[mikser-sdk] initialUrl is set on "${endpoint}" but this ${kind}() call uses ${reasonLabel} — snapshot bypassed, falling back to ${fallback}.\n` +
+        `[mikser-sdk] data.catalog is set on "${endpoint}" but this ${kind}() call uses ${reasonLabel} — snapshot bypassed, falling back to ${fallback}.\n` +
         `  Snapshots only apply when the call is trivial (no filter/sort/skip).\n` +
         `  Either remove the ${reasonLabel} from this call, or accept the API roundtrip if filtering is intentional.\n` +
         `  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.`,
@@ -95,68 +95,105 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
     return function entities(name, opts = {}) {
         const {
             token,
-            // initialUrl: optional URL (relative to baseUrl or absolute) for a
-            // pre-built static JSON snapshot — typically produced by the
-            // `data` plugin's catalog.<name> output. When set, live() fires
-            // onChange with the snapshot immediately, then opens the SSE
-            // subscribe stream as usual. listAll() also consults the
-            // snapshot before falling back to paginated list calls.
+            // `data` mirrors the mikser-io `data` plugin's config block:
             //
-            // The fetched JSON is unwrapped automatically — the data
-            // plugin emits `[{ refId, name, date, data }, ...]`; we
-            // return the `.data` payloads. Plain arrays and { items }
-            // envelopes are passed through unchanged.
+            //   data: {
+            //       catalog:  'sitemap',   // pairs with data.catalog.sitemap
+            //       entities: 'page',      // pairs with data.entities.page
+            //   }
             //
-            // Pre-built snapshots are the fast first-paint path:
-            // CDN-cached, no API roundtrip, no SSE latency tax on boot.
-            // Pair the snapshot's data-plugin filter with your live()
-            // filter so the initial state matches what SSE will send.
-            initialUrl,
-            // When initialUrl fetch fails (404 in dev, network error,
-            // wrong shape), default behavior is to log and fall back to
-            // a fresh list() call — keeps dev mode trivial. Set false
-            // for environments where you require the snapshot.
-            fallbackToList = true,
+            // On the server the data plugin writes:
+            //   - catalog.<name>  → out/data/<name>.json                   (one combined file)
+            //   - entities.<name> → out/data/<entity.name>.<name>.json     (one file per entity)
+            //
+            // On the client:
+            //   - `data.catalog` makes live() / listAll() consult
+            //     /data/<this>.json on first paint, falling back to a
+            //     fresh list() if the file is missing.
+            //   - `data.entities` makes live({id}) consult the per-entity
+            //     file /data/<entry.name>.<this>.json, falling back to a
+            //     fresh list({filter:{id}}) call. Requires `data.catalog`
+            //     to be loaded so the entity's `name` is known (the
+            //     mapping comes from the catalog wrapper, not the id).
+            //
+            // Default URL prefix is /data/ to match the data plugin's
+            // default `dataFolder`. If a project customizes `data.dataFolder`
+            // server-side, add a matching prefix here — but for now this
+            // is hardcoded.
+            data: dataConfig = {},
         } = opts
+        const { catalog: catalogName, entities: entitiesName } = dataConfig
         const endpointBase = `${basePath}/${name}`
         const queryUrl     = joinUrl(baseUrl, `${endpointBase}/entities/query`)
         const listUrl      = joinUrl(baseUrl, `${endpointBase}/entities`)
         const subscribeUrl = joinUrl(baseUrl, `${endpointBase}/entities/subscribe`)
         const renderUrl    = joinUrl(baseUrl, `${endpointBase}/render`)
 
-        const resolvedInitialUrl = initialUrl
-            ? (/^https?:\/\//.test(initialUrl) ? initialUrl : joinUrl(baseUrl, initialUrl))
+        // Default URL prefix matches the data plugin's default folder.
+        const DATA_PREFIX = '/data'
+
+        const catalogUrl = catalogName
+            ? joinUrl(baseUrl, `${DATA_PREFIX}/${catalogName}.json`)
             : null
+
+        // id → entity.name index, populated when the catalog snapshot
+        // loads. Lets `live({id})` derive the per-entity file URL
+        // without re-fetching the catalog or guessing.
+        const nameById = new Map()
 
         // Cached snapshot promise — concurrent live() / listAll() calls
         // share one fetch. Cleared on error so a flaky connection can
         // recover on the next call.
         let snapshotPromise = null
         async function loadSnapshot() {
-            if (!resolvedInitialUrl) return null
+            if (!catalogUrl) return null
             if (snapshotPromise) return snapshotPromise
             snapshotPromise = (async () => {
                 try {
-                    const res = await doFetch(resolvedInitialUrl, {
+                    const res = await doFetch(catalogUrl, {
                         method: 'GET',
                         headers: { accept: 'application/json', ...defaultHeaders },
                     })
-                    if (!res.ok) {
-                        if (!fallbackToList) {
-                            throw new MikserError(res.status, res.statusText, null, resolvedInitialUrl)
-                        }
-                        return null
-                    }
+                    if (!res.ok) return null
                     const payload = await res.json()
-                    return unwrapSnapshot(payload)
+                    return unwrapSnapshot(payload, nameById)
                 } catch (err) {
                     // Clear the cached promise so the next call can retry.
                     snapshotPromise = null
-                    if (!fallbackToList) throw err
                     return null
                 }
             })()
             return snapshotPromise
+        }
+
+        // Per-entity file fetch — for live({id}) when data.entities is
+        // configured. Always returns either the entity or null (null
+        // means "fall back to the API"). Never throws.
+        async function loadEntityFile(id) {
+            if (!entitiesName) return null
+            const entityName = nameById.get(id)
+            if (!entityName) {
+                // The catalog isn't loaded yet, or this id wasn't in it.
+                // Trigger a catalog load lazily; the next call will hit
+                // the populated map.
+                await loadSnapshot()
+                if (!nameById.has(id)) return null
+            }
+            const url = joinUrl(baseUrl, `${DATA_PREFIX}/${nameById.get(id)}.${entitiesName}.json`)
+            try {
+                const res = await doFetch(url, {
+                    method: 'GET',
+                    headers: { accept: 'application/json', ...defaultHeaders },
+                })
+                if (!res.ok) return null
+                const payload = await res.json()
+                // Per-entity files are single-object wrappers:
+                //   { refId, name, date, data: {...} }
+                // unwrapEntityFile pulls out `data`.
+                return unwrapEntityFile(payload)
+            } catch {
+                return null
+            }
         }
 
         /**
@@ -263,7 +300,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             // require re-querying the live endpoint anyway, so any
             // non-trivial query falls through to the paginated fetch.
             const trivial = !query.filter && !query.sort && !query.skip
-            if (trivial && resolvedInitialUrl) {
+            if (trivial && catalogUrl) {
                 const snapshot = await loadSnapshot()
                 if (snapshot) {
                     return query.fields
@@ -272,7 +309,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                 }
                 // Snapshot unavailable — fall through to paginated fetch.
             }
-            if (!trivial && resolvedInitialUrl) {
+            if (!trivial && catalogUrl) {
                 maybeWarnSnapshotBypass({
                     endpoint: name, kind: 'listAll',
                     filter: query.filter, sort: query.sort, skip: query.skip,
@@ -386,35 +423,60 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
 
             const loop = (async () => {
                 try {
-                    // Snapshot fast path. Use it only when the caller's
-                    // query is trivial enough that the pre-built array
-                    // reflects what list() would return — anything more
-                    // specific (filter, sort, skip) goes through list()
-                    // so the caller's intent is honored.
-                    let usedSnapshot = false
+                    let usedFastPath = false
                     const trivial = !filter && !sort && !skip
-                    if (trivial && resolvedInitialUrl) {
+
+                    // Per-entity file fast path. When the call is a
+                    // single-id lookup (the shape useDocument issues)
+                    // and `data.entities` is configured, fetch the
+                    // pre-built file the data plugin wrote instead of
+                    // calling the API. Falls back to list() if the
+                    // file isn't there.
+                    const isSingleIdLookup = (
+                        entitiesName &&
+                        filter && typeof filter === 'object' &&
+                        Object.keys(filter).length === 1 &&
+                        'id' in filter && filter.id != null
+                    )
+                    if (isSingleIdLookup) {
+                        const entity = await loadEntityFile(filter.id)
+                        if (entity) {
+                            if (disposed || ac.signal.aborted) return
+                            items = fields ? [pickFields(entity, fields)] : [entity]
+                            onChange(items)
+                            usedFastPath = true
+                        }
+                    }
+
+                    // Catalog snapshot fast path. Used only when the
+                    // call is trivial enough that the pre-built array
+                    // reflects what list() would return — anything
+                    // more specific (filter, sort, skip) goes through
+                    // list() so the caller's intent is honored.
+                    if (!usedFastPath && trivial && catalogUrl) {
                         const snapshot = await loadSnapshot()
                         if (snapshot) {
                             if (disposed || ac.signal.aborted) return
                             items = fields ? snapshot.map(i => pickFields(i, fields)) : snapshot
                             onChange(items)
-                            usedSnapshot = true
+                            usedFastPath = true
                         }
                     }
-                    if (!trivial && resolvedInitialUrl) {
+
+                    // Bypass warning for cases where the user opted into
+                    // a snapshot but their call doesn't fit either fast
+                    // path. The single-id lookup is its own valid shape,
+                    // so don't warn for it.
+                    if (!usedFastPath && !isSingleIdLookup && !trivial && catalogUrl) {
                         maybeWarnSnapshotBypass({
                             endpoint: name, kind: 'live',
                             filter, sort, skip, quiet,
                         })
                     }
-                    if (!usedSnapshot) {
+
+                    if (!usedFastPath) {
                         // Pass { quiet } so list()'s wide-warning honors
-                        // the live() caller's quiet opt. live() also
-                        // does its own snapshot-path warning below for
-                        // the case where the initial fill came from
-                        // /data/<name>.json — those callers already
-                        // opted into the narrow shape, so no warning.
+                        // the live() caller's quiet opt.
                         const env = await list({ filter, sort, fields, limit, skip }, { quiet })
                         if (disposed || ac.signal.aborted) return
                         items = env.items
@@ -526,21 +588,44 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
 //   - plain array of entities:     [{ id, meta, ... }, ...]
 //   - list() envelope:             { items: [...], page, ... }
 // Returns null on unrecognised shapes so the caller can decide to fall
-// back to a fresh list() call (when fallbackToList is true).
-function unwrapSnapshot(payload) {
+// back to a fresh list() call.
+function unwrapSnapshot(payload, nameById) {
     if (Array.isArray(payload)) {
         if (payload.length === 0) return []
         // Heuristic: data-plugin entries have `refId` + `data`; treat any
         // object with `data` as a wrapped entry and unwrap. Anything else
         // is a plain array.
         if (payload[0] && typeof payload[0] === 'object' && 'data' in payload[0]) {
-            return payload.map(entry => entry.data).filter(Boolean)
+            return payload
+                .map(entry => {
+                    if (!entry || !entry.data) return null
+                    // Side-table: stash entity.name keyed by entity.id so
+                    // live({id}) can compute per-entity file URLs later.
+                    if (nameById && entry.data.id != null && entry.name != null) {
+                        nameById.set(entry.data.id, entry.name)
+                    }
+                    return entry.data
+                })
+                .filter(Boolean)
         }
         return payload
     }
     if (payload && typeof payload === 'object' && Array.isArray(payload.items)) {
         return payload.items
     }
+    return null
+}
+
+// Per-entity files are single-object wrappers — `{ refId, name, date,
+// data: {...} }` — written by `data.entities.<name>` on the server.
+// Returns the unwrapped data, or null if the shape isn't recognised.
+function unwrapEntityFile(payload) {
+    if (!payload || typeof payload !== 'object') return null
+    if ('data' in payload && payload.data && typeof payload.data === 'object') {
+        return payload.data
+    }
+    // Plain entity (someone hand-wrote a JSON file, no wrapper) — accept it.
+    if ('id' in payload) return payload
     return null
 }
 

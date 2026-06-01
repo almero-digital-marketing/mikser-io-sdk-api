@@ -105,30 +105,35 @@ Operations outside the endpoint's allowlist return `403`; missing or wrong token
 
 `mikser.entities(endpointName, options)` returns a per-endpoint client. The endpoint name matches a key in your `api.endpoints` config on the server. Supported options:
 
-| Option            | Default | What it does                                                                                  |
+| Option   | Default | What it does                                                              |
 |---|---|---|
-| `token`           | `null`  | Bearer token for endpoints declared with a token. Sent on every request.                       |
-| `initialUrl`      | `null`  | Static-snapshot URL — see below.                                                              |
-| `fallbackToList`  | `true`  | If `initialUrl` is set and the fetch fails (404 in dev, wrong shape, network error), fall back to a live `list()`. Set `false` for production deploys where missing the snapshot should be a hard error. |
+| `token`  | `null`  | Bearer token for endpoints declared with a token. Sent on every request.  |
+| `data`   | `{}`    | Pairs the client with the mikser-io `data` plugin's static-file outputs. See below. |
 
-### `initialUrl` — pair with the `data` plugin for fast first paint
+### `data` — pair with the `data` plugin for fast first paint
 
-If you have a known, predictable query that runs on every page load — a route table for an SPA, a navigation menu, a category list — paying an API round-trip for it on first paint is wasted work. The right shape is to publish that data as a static file at build/finalize time and have the SDK pick it up.
+If you have a known, predictable query that runs on every page load — a route table for an SPA, a navigation menu, a per-document body — paying an API round-trip for it on first paint is wasted work. The mikser-io `data` plugin lets you publish that data as static files at build/finalize time, and the SDK consumes them on the client side. The option names on both sides are the same — `catalog` and `entities` — so it reads as one config split across the network.
 
-Mikser's `data` plugin does the publishing side. A `catalog.<name>` entry writes one JSON file per name under `out/data/`; `<name>` is whatever you want to call it — name it after the role the snapshot plays in your app (`sitemap`, `menu`, `tags`, `categories`, etc.). Example for a router-driving snapshot:
+Mikser's `data` plugin has two relevant blocks:
 
 ```js
 // mikser.config.js
-plugins: ['documents', 'front-matter', 'data', 'api', /* ... */],
-
 data: {
     catalog: {
-        // out/data/sitemap.json — one entry per published, component-having
-        // document, projected to just the routing fields. `sitemap` is the
-        // catalog-entry name; the SDK below uses the matching URL path.
+        // out/data/sitemap.json — one combined file for the whole catalog,
+        // projected to just the fields your router/nav needs.
         sitemap: {
             query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
             pick: ['id', 'destination', 'meta.component', 'meta.route', 'meta.title'],
+        },
+    },
+    entities: {
+        // out/data/<entity.name>.page.json — one file per published document,
+        // with full content. Consumed by useDocument(id) for first-paint
+        // single-doc reads.
+        page: {
+            query: e => e.type === 'document' && e.meta?.published,
+            pick: ['id', 'meta', 'content'],
         },
     },
 },
@@ -144,29 +149,35 @@ api: {
 },
 ```
 
-On the client, point `entities()` at the matching file. The URL path mirrors the catalog name: `data.catalog.sitemap` → `/data/sitemap.json`, `data.catalog.menu` → `/data/menu.json`, and so on.
+On the client, name the same blocks. The names you pass match the keys you used on the server side:
 
 ```js
 const documents = createClient({ baseUrl: 'https://cms.example.com' })
-    .entities('public', { initialUrl: '/data/sitemap.json' })
+    .entities('public', {
+        data: {
+            catalog:  'sitemap',   // /data/sitemap.json
+            entities: 'page',      // /data/<entry.name>.page.json
+        },
+    })
 ```
 
-What `initialUrl` changes:
+What gets used when:
 
-- **`live(filter, onChange, options)`** fires `onChange` with the snapshot immediately (no API round-trip), then opens the SSE subscribe stream as usual. So `useMikserRoutes` / `useMikserPages` get a populated route table before the network even settles.
-- **`listAll()`** consults the snapshot first and only falls back to paginated `list()` calls if the snapshot is missing or `fallbackToList: true` and the fetch failed.
-- **`list()`**, `urlFor()`, `query()`, `update()`, `delete()`, `render()`, `subscribe()` are unchanged — they always go to the API.
+- **`live({id})` / `useDocument(id)`** — if `data.entities` is set, the SDK fetches the matching per-entity file instead of calling the API. Needs `data.catalog` to be loaded too, so the entry's `name` is known. The SSE subscribe still opens for live updates.
+- **`live(filter, onChange, options)` with no filter** / **`listAll()`** — if `data.catalog` is set, the SDK consults `/data/<catalog>.json` for first paint, then opens SSE.
+- **`list()`**, **`urlFor()`**, **`query()`**, **`update()`**, **`delete()`**, **`render()`**, **`subscribe()`** — unchanged, always hit the API.
+- **Any file fetch failure** — falls back to the live API for that call. No separate flag.
 
-The data plugin emits each entry as `{ refId, name, date, data: {...picked} }`. The SDK strips that wrapper automatically and hands `onChange` / `listAll` a plain array of the `data` payloads, so a static snapshot looks identical to a live response.
+The data plugin emits each entry as `{ refId, name, date, data: {...picked} }`. The SDK strips that wrapper automatically — `onChange` and `listAll` always see plain payloads regardless of source.
 
-This is **not** a cache. The snapshot is only consulted for the initial fill; ongoing changes come over SSE on the actual API endpoint. For runtime fail-safety on per-id reads, that's what the api plugin's `cache: true` is for — see [mikser-io's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md).
+This is **not** a cache. The data plugin's files are only consulted for the initial fill; ongoing changes come over SSE on the actual API endpoint. For runtime fail-safety on the live API, that's what the api plugin's `cache: true` is for — see [mikser-io's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md).
 
-**Edge case: first-paint flash for fast-changing snapshots.** First paint renders the snapshot — which may be N seconds old, depending on when mikser last wrote it — and the SSE stream then arrives and reconciles any changes since. For a route table that's invisible; routes don't move every second. For snapshots of fast-changing data (recent activity, in-stock badges, live counters) the user may briefly see stale content before SSE catches up. If that flash is visible UX, either design for it (e.g. show a subtle "syncing" indicator until the first SSE event arrives, or render a loading state when the snapshot age exceeds your tolerance) or skip `initialUrl` for that particular query — paying the API roundtrip is the right tradeoff when the response can't be allowed to be stale.
+**Edge case: first-paint flash for fast-changing snapshots.** First paint renders whatever the data plugin last wrote — which may be N seconds old — and the SSE stream then arrives and reconciles any changes since. For a route table that's invisible; routes don't move every second. For snapshots of fast-changing data (recent activity, in-stock badges, live counters) the user may briefly see stale content before SSE catches up. If that flash is visible UX, either design for it (subtle "syncing" indicator until the first SSE event arrives, or render a loading state when the snapshot age exceeds your tolerance) or skip `data.catalog` / `data.entities` for that particular client — paying the API roundtrip is the right tradeoff when the response can't be allowed to be stale.
 
 **Snapshot-bypass warning.** Snapshots only apply when the `live()` / `listAll()` call is trivial — no filter, no sort, no skip. Add any of those and the SDK silently falls back to the live API. Since that's the kind of thing a developer can change without noticing, the SDK emits a one-time `console.warn` per `(endpoint, call kind, what-was-set)` shape:
 
 ```
-[mikser-sdk] initialUrl is set on "public" but this live() call uses filter+sort
+[mikser-sdk] data.catalog is set on "public" but this live() call uses filter+sort
   — snapshot bypassed, falling back to live list().
   Snapshots only apply when the call is trivial (no filter/sort/skip).
   Either remove the filter+sort from this call, or accept the API roundtrip if
@@ -184,7 +195,7 @@ The common failure mode for a CMS-backed app is "I just wanted a nav menu but pu
 [mikser-sdk] list() returned 247 items (~4.2 MB) from "public" with no `fields` projection.
   Add { fields: [...] } to narrow it, or — if this query runs on every page load —
   move it to a `data.catalog.<name>` snapshot on the mikser side and load via:
-    entities('public', { initialUrl: '/data/<name>.json' })
+    entities('public', { data: { catalog: '<name>' } })
   Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.
 ```
 
