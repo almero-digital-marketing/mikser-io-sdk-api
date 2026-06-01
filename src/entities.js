@@ -62,6 +62,35 @@ function maybeWarnWide({ endpoint, query, envelopeOrItems, quiet }) {
     )
 }
 
+// Snapshot-bypass warning — fires when `initialUrl` is configured but
+// the call is non-trivial (has filter / sort / skip), so the snapshot
+// can't be used and the SDK falls back to the live API. The bypass is
+// correct behavior, but it's silent: developers often set initialUrl
+// once and then add a sort to one of their useDocuments calls without
+// noticing the snapshot is no longer involved. Deduped per
+// (endpoint, kind, what-was-set) so a page with 3 filtered calls
+// produces 3 warnings, not 30.
+const _bypassedShapes = new Set()
+function maybeWarnSnapshotBypass({ endpoint, kind, filter, sort, skip, quiet }) {
+    if (quiet || isProductionEnv() || isQuiet()) return
+    const reasons = []
+    if (filter) reasons.push('filter')
+    if (sort)   reasons.push('sort')
+    if (skip != null) reasons.push('skip')
+    if (reasons.length === 0) return
+    const reasonLabel = reasons.join('+')
+    const shape = `${endpoint}|${kind}|${reasonLabel}`
+    if (_bypassedShapes.has(shape)) return
+    _bypassedShapes.add(shape)
+    const fallback = kind === 'live' ? 'live list()' : 'paginated fetch'
+    console.warn(
+        `[mikser-sdk] initialUrl is set on "${endpoint}" but this ${kind}() call uses ${reasonLabel} — snapshot bypassed, falling back to ${fallback}.\n` +
+        `  Snapshots only apply when the call is trivial (no filter/sort/skip).\n` +
+        `  Either remove the ${reasonLabel} from this call, or accept the API roundtrip if filtering is intentional.\n` +
+        `  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.`,
+    )
+}
+
 export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, headers: defaultHeaders }) {
     return function entities(name, opts = {}) {
         const {
@@ -243,6 +272,12 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                 }
                 // Snapshot unavailable — fall through to paginated fetch.
             }
+            if (!trivial && resolvedInitialUrl) {
+                maybeWarnSnapshotBypass({
+                    endpoint: name, kind: 'listAll',
+                    filter: query.filter, sort: query.sort, skip: query.skip,
+                })
+            }
             const items = []
             for await (const env of pages({ limit: 1000, ...query })) {
                 items.push(...env.items)
@@ -366,6 +401,12 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                             onChange(items)
                             usedSnapshot = true
                         }
+                    }
+                    if (!trivial && resolvedInitialUrl) {
+                        maybeWarnSnapshotBypass({
+                            endpoint: name, kind: 'live',
+                            filter, sort, skip, quiet,
+                        })
                     }
                     if (!usedSnapshot) {
                         // Pass { quiet } so list()'s wide-warning honors

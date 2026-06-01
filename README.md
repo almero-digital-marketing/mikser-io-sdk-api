@@ -161,6 +161,21 @@ The data plugin emits each entry as `{ refId, name, date, data: {...picked} }`. 
 
 This is **not** a cache. The snapshot is only consulted for the initial fill; ongoing changes come over SSE on the actual API endpoint. For runtime fail-safety on per-id reads, that's what the api plugin's `cache: true` is for — see [mikser-io's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md).
 
+**Edge case: first-paint flash for fast-changing snapshots.** First paint renders the snapshot — which may be N seconds old, depending on when mikser last wrote it — and the SSE stream then arrives and reconciles any changes since. For a route table that's invisible; routes don't move every second. For snapshots of fast-changing data (recent activity, in-stock badges, live counters) the user may briefly see stale content before SSE catches up. If that flash is visible UX, either design for it (e.g. show a subtle "syncing" indicator until the first SSE event arrives, or render a loading state when the snapshot age exceeds your tolerance) or skip `initialUrl` for that particular query — paying the API roundtrip is the right tradeoff when the response can't be allowed to be stale.
+
+**Snapshot-bypass warning.** Snapshots only apply when the `live()` / `listAll()` call is trivial — no filter, no sort, no skip. Add any of those and the SDK silently falls back to the live API. Since that's the kind of thing a developer can change without noticing, the SDK emits a one-time `console.warn` per `(endpoint, call kind, what-was-set)` shape:
+
+```
+[mikser-sdk] initialUrl is set on "public" but this live() call uses filter+sort
+  — snapshot bypassed, falling back to live list().
+  Snapshots only apply when the call is trivial (no filter/sort/skip).
+  Either remove the filter+sort from this call, or accept the API roundtrip if
+  filtering is intentional.
+  Suppress: pass { quiet: true } on the call, or set MIKSER_QUIET=1.
+```
+
+Same suppression channels as the wide-list warning above.
+
 ### Dev-mode warning: accidentally wide queries
 
 The common failure mode for a CMS-backed app is "I just wanted a nav menu but pulled every full document over the wire." To catch it at write time, `list()` and `live()` emit a one-time dev-mode `console.warn` when a response has more than 50 items and the query has no `fields:` projection:
