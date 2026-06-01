@@ -103,7 +103,62 @@ Operations outside the endpoint's allowlist return `403`; missing or wrong token
 
 ## Entities
 
-`mikser.entities(endpointName, { token })` returns a per-endpoint client. The endpoint name matches a key in your `api.endpoints` config on the server.
+`mikser.entities(endpointName, options)` returns a per-endpoint client. The endpoint name matches a key in your `api.endpoints` config on the server. Supported options:
+
+| Option            | Default | What it does                                                                                  |
+|---|---|---|
+| `token`           | `null`  | Bearer token for endpoints declared with a token. Sent on every request.                       |
+| `initialUrl`      | `null`  | Static-snapshot URL — see below.                                                              |
+| `fallbackToList`  | `true`  | If `initialUrl` is set and the fetch fails (404 in dev, wrong shape, network error), fall back to a live `list()`. Set `false` for production deploys where missing the snapshot should be a hard error. |
+
+### `initialUrl` — pair with the `data` plugin for fast first paint
+
+If you have a known, predictable query that runs on every page load — the canonical example is the **route table for an SPA** — paying an API round-trip for it on first paint is wasted work. The right shape is to publish that data as a static file at build/finalize time and have the SDK pick it up.
+
+Mikser's `data` plugin does the publishing side. A `catalog.<name>` entry writes one JSON file per name under `out/data/`:
+
+```js
+// mikser.config.js
+plugins: ['documents', 'front-matter', 'data', 'api', /* ... */],
+
+data: {
+    catalog: {
+        // out/data/sitemap.json — one entry per published, component-having
+        // document, projected to just the routing fields.
+        sitemap: {
+            query: e => e.type === 'document' && e.meta?.published && e.meta?.component,
+            pick: ['id', 'destination', 'meta'],
+        },
+    },
+},
+
+api: {
+    endpoints: {
+        public: {
+            query: e => e.type === 'document' && e.meta?.published,
+            operations: ['list', 'subscribe'],
+            cache: true,
+        },
+    },
+},
+```
+
+On the client, point `entities()` at the same file:
+
+```js
+const documents = createClient({ baseUrl: 'https://cms.example.com' })
+    .entities('public', { initialUrl: '/data/sitemap.json' })
+```
+
+What `initialUrl` changes:
+
+- **`live(filter, onChange, options)`** fires `onChange` with the snapshot immediately (no API round-trip), then opens the SSE subscribe stream as usual. So `useMikserRoutes` / `useMikserPages` get a populated route table before the network even settles.
+- **`listAll()`** consults the snapshot first and only falls back to paginated `list()` calls if the snapshot is missing or `fallbackToList: true` and the fetch failed.
+- **`list()`**, `urlFor()`, `query()`, `update()`, `delete()`, `render()`, `subscribe()` are unchanged — they always go to the API.
+
+The data plugin emits each entry as `{ refId, name, date, data: {...picked} }`. The SDK strips that wrapper automatically and hands `onChange` / `listAll` a plain array of the `data` payloads, so a static snapshot looks identical to a live response.
+
+This is **not** a cache. The snapshot is only consulted for the initial fill; ongoing changes come over SSE on the actual API endpoint. For runtime fail-safety on per-id reads, that's what the api plugin's `cache: true` is for — see [mikser-io's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md).
 
 ### `list(query)` — body-based
 
