@@ -55,7 +55,12 @@ describe('createClient', () => {
         ])
         const client = createClient({ baseUrl: 'http://x', fetch })
         await client.entities('public').list({})
-        expect(fetch.calls[0][0]).toBe('http://x/api/public/entities/query')
+        // list() defaults to GET against /entities so the api plugin's
+        // per-query disk cache (and any upstream CDN) can serve the
+        // response on subsequent calls. The POST /entities/query path
+        // is a fallback for oversize URLs and explicit opt-in.
+        expect(fetch.calls[0][0]).toBe('http://x/api/public/entities')
+        expect(fetch.calls[0][1].method).toBe('GET')
     })
 
     it('honors a custom basePath', async () => {
@@ -64,6 +69,7 @@ describe('createClient', () => {
         ])
         const client = createClient({ baseUrl: 'http://x', basePath: '/v1', fetch })
         await client.entities('public').list({})
-        expect(fetch.calls[0][0]).toBe('http://x/v1/public/entities/query')
+        expect(fetch.calls[0][0]).toBe('http://x/v1/public/entities')
+        expect(fetch.calls[0][1].method).toBe('GET')
     })
 })

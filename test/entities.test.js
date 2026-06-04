@@ -16,7 +16,7 @@ function envelope({ items = [], page = 1, limit = 10, total = items.length, hasN
 }
 
 describe('entities().list', () => {
-    it('POSTs the query body to /entities/query', async () => {
+    it('GETs /entities with the query encoded into URL params', async () => {
         const fetch = scriptedFetch([() => fakeResponse({ json: envelope({ items: [{ id: 'a' }] }) })])
         const client = createClient({ baseUrl: 'http://x', fetch })
         const result = await client.entities('public').list({
@@ -27,22 +27,24 @@ describe('entities().list', () => {
 
         expect(fetch.calls).toHaveLength(1)
         const [url, init] = fetch.calls[0]
-        expect(url).toBe('http://x/api/public/entities/query')
-        expect(init.method).toBe('POST')
-        expect(init.headers['content-type']).toBe('application/json')
-        expect(JSON.parse(init.body)).toEqual({
-            filter: { 'meta.published': true },
-            sort: { 'meta.date': -1 },
-            limit: 5,
-        })
+        const parsed = new URL(url)
+        expect(parsed.origin + parsed.pathname).toBe('http://x/api/public/entities')
+        expect(init.method).toBe('GET')
+        expect(init.body).toBeUndefined()
+        expect(parsed.searchParams.get('limit')).toBe('5')
+        expect(parsed.searchParams.get('sort')).toBe('-meta.date')
+        expect(parsed.searchParams.get('meta.published')).toBe('true')
         expect(result.items).toEqual([{ id: 'a' }])
     })
 
-    it('defaults to an empty body when no query is passed', async () => {
+    it('GETs the bare URL when no query is passed', async () => {
         const fetch = scriptedFetch([() => fakeResponse({ json: envelope() })])
         const client = createClient({ baseUrl: 'http://x', fetch })
         await client.entities('public').list()
-        expect(JSON.parse(fetch.calls[0][1].body)).toEqual({})
+        const [url, init] = fetch.calls[0]
+        expect(url).toBe('http://x/api/public/entities')
+        expect(init.method).toBe('GET')
+        expect(init.body).toBeUndefined()
     })
 
     it('attaches a Bearer token when the endpoint has one', async () => {
@@ -66,6 +68,47 @@ describe('entities().list', () => {
         expect(err).toBeInstanceOf(MikserError)
         expect(err.status).toBe(401)
         expect(err.body).toEqual({ error: 'token required' })
+    })
+})
+
+describe('entities().list POST fallback', () => {
+    it('uses POST /entities/query when opts.method = "POST" is forced', async () => {
+        // Explicit POST opt-out from the GET cache path — used when the
+        // caller doesn't want the request to be cached (e.g. queries
+        // carrying secrets in the filter that shouldn't sit in proxy logs).
+        const fetch = scriptedFetch([() => fakeResponse({ json: envelope({ items: [{ id: 'p' }] }) })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        const result = await client.entities('public').list(
+            { filter: { 'meta.published': true }, limit: 5 },
+            { method: 'POST' },
+        )
+
+        expect(fetch.calls).toHaveLength(1)
+        const [url, init] = fetch.calls[0]
+        expect(url).toBe('http://x/api/public/entities/query')
+        expect(init.method).toBe('POST')
+        expect(init.headers['content-type']).toBe('application/json')
+        expect(JSON.parse(init.body)).toEqual({
+            filter: { 'meta.published': true },
+            limit: 5,
+        })
+        expect(result.items).toEqual([{ id: 'p' }])
+    })
+
+    it('uses POST /entities/query when the GET URL would exceed the size cap', async () => {
+        // 200 long ids in an $in filter pushes the encoded URL well past
+        // the ~1800-char cap, triggering the POST fallback automatically.
+        const fetch = scriptedFetch([() => fakeResponse({ json: envelope({ items: [] }) })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+
+        const ids = Array.from({ length: 200 }, (_, i) => `id-${String(i).padStart(10, '0')}`)
+        await client.entities('public').list({ filter: { id: { $in: ids } } })
+
+        const [url, init] = fetch.calls[0]
+        expect(url).toBe('http://x/api/public/entities/query')
+        expect(init.method).toBe('POST')
+        expect(init.headers['content-type']).toBe('application/json')
+        expect(JSON.parse(init.body)).toEqual({ filter: { id: { $in: ids } } })
     })
 })
 
@@ -141,7 +184,7 @@ describe('entities().listAll', () => {
         ])
         const client = createClient({ baseUrl: 'http://x', fetch })
         await client.entities('public').listAll({})
-        expect(JSON.parse(fetch.calls[0][1].body).limit).toBe(1000)
+        expect(new URL(fetch.calls[0][0]).searchParams.get('limit')).toBe('1000')
     })
 
     it('honors an explicit limit as per-page batch (not total cap)', async () => {
@@ -152,8 +195,8 @@ describe('entities().listAll', () => {
         const client = createClient({ baseUrl: 'http://x', fetch })
         const items = await client.entities('public').listAll({ limit: 3 })
         expect(items).toEqual([1, 2, 3, 4, 5, 6])      // returns ALL 6, not capped at 3
-        const bodies = fetch.calls.map(([, init]) => JSON.parse(init.body))
-        expect(bodies.every(b => b.limit === 3)).toBe(true)
+        const limits = fetch.calls.map(([url]) => new URL(url).searchParams.get('limit'))
+        expect(limits.every(l => l === '3')).toBe(true)
     })
 
     it('propagates a list() error', async () => {
@@ -181,8 +224,8 @@ describe('entities().pages', () => {
         }
         expect(pages).toEqual([[1, 2], [3, 4], [5]])
         // Verify each subsequent call asked for the next page
-        const bodies = fetch.calls.map(([, init]) => JSON.parse(init.body))
-        expect(bodies.map(b => b.page)).toEqual([1, 2, 3])
+        const pageParams = fetch.calls.map(([url]) => new URL(url).searchParams.get('page'))
+        expect(pageParams).toEqual(['1', '2', '3'])
     })
 
     it('starts from the page in the query if supplied', async () => {
@@ -195,7 +238,7 @@ describe('entities().pages', () => {
             collected.push(env)
         }
         expect(collected).toHaveLength(1)
-        expect(JSON.parse(fetch.calls[0][1].body).page).toBe(5)
+        expect(new URL(fetch.calls[0][0]).searchParams.get('page')).toBe('5')
     })
 })
 

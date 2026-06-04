@@ -23,7 +23,7 @@
     "test:run": "vitest run"
   },
   "devDependencies": {
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.8"
   },
   "repository": {
     "type": "git",
