@@ -27,6 +27,9 @@
 //   src/url.js       — URL building (joinUrl, sortToParam, filterToParams)
 //   src/sse.js       — SSE event parser
 //   src/entities.js  — per-endpoint entities client (list / watch / live / ...)
+//   src/routes.js    — generateMikserRoutes (build-time route enumeration)
+//   src/href.js      — createHrefIndex (multilingual reference → URL lookup)
+//   src/asset.js     — createAssetIndex (asset metadata lookup)
 import { MikserError } from './src/error.js'
 import { createEntitiesClient } from './src/entities.js'
 
@@ -60,3 +63,6 @@ export function createClient({
 }
 
 export { MikserError }
+export { generateMikserRoutes } from './src/routes.js'
+export { createHrefIndex }      from './src/href.js'
+export { createAssetIndex }     from './src/asset.js'

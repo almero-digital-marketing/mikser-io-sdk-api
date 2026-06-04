@@ -187,3 +187,86 @@ export declare class MikserError extends Error {
     status: number
     body: { error?: string } | undefined
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Pure utilities — framework SDKs wrap these in their own reactivity.
+// ────────────────────────────────────────────────────────────────────
+
+export interface GenerateRoutesOptions<TRoute = unknown> {
+    /** A mikser entities client (the result of createClient(...).entities(name)). */
+    client: { listAll(query: ListQuery): Promise<Array<{ id: string; meta?: Record<string, unknown> }>> }
+    /** Sift filter — defaults to "published documents that declare meta.route". */
+    filter?: Filter
+    /** Maps a catalog document to a route descriptor (or null to skip). */
+    mapRoute: (document: { id: string; meta?: Record<string, unknown> }) => TRoute | null
+}
+
+/**
+ * Build-time route enumeration. Auto-paginates via listAll() and
+ * applies `mapRoute` to every catalog entity that matches the filter.
+ * `null` returns from `mapRoute` are dropped.
+ */
+export function generateMikserRoutes<TRoute = unknown>(
+    options: GenerateRoutesOptions<TRoute>,
+): Promise<TRoute[]>
+
+export interface HrefIndexOptions {
+    /** Fallback language tag for documents that don't declare meta.lang. Default 'default'. */
+    defaultLang?: string
+}
+
+export interface HrefIndex {
+    /** Resolve a logical reference (`/about`) to a deployed URL for the given language. */
+    href(ref: string, lang?: string): string
+    /** Reverse — given a deployed URL, return the logical reference it belongs to. */
+    refFor(url: string | null): string | null
+    /** Alternates for a deployed URL — `current` plus the alternate-language URLs. */
+    alternates(options: { route: string | null; languages?: string[] }): {
+        current: { lang: string | null; url: string; ref: string } | null
+        alternates: Array<{ lang: string; url: string }>
+    }
+    /** Raw `ref → { lang → url }` map, for inspection / debugging. */
+    map: Record<string, Record<string, string>>
+}
+
+/**
+ * Build a multilingual href lookup from a snapshot of catalog documents.
+ * Pure data transformation — wrap in a framework-specific reactive
+ * shell to drive `useHref` / `useAlternates` composables.
+ */
+export function createHrefIndex(
+    documents: Array<{ meta?: Record<string, unknown> }>,
+    options?: HrefIndexOptions,
+): HrefIndex
+
+export interface AssetRecord {
+    url: string
+    width?: number
+    height?: number
+    srcset?: string
+    alt?: string
+    meta?: Record<string, unknown>
+}
+
+export interface ImageProps {
+    src: string
+    width?: number
+    height?: number
+    srcset?: string
+    alt?: string
+}
+
+export interface AssetIndex {
+    asset(ref: string): AssetRecord | null
+    image(ref: string): ImageProps | null
+    map: Record<string, AssetRecord>
+}
+
+/**
+ * Build an asset metadata lookup from a snapshot of asset entities.
+ * Pure data transformation — wrap in a framework-specific reactive
+ * shell to drive `useAsset` composables.
+ */
+export function createAssetIndex(
+    assets: Array<{ id: string; meta?: Record<string, unknown> }>,
+): AssetIndex
