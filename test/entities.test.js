@@ -154,6 +154,181 @@ describe('entities().urlFor', () => {
         expect(url.searchParams.get('page')).toBe('0')
         expect(url.searchParams.get('limit')).toBe('0')
     })
+
+    it('serializes expand paths as comma-separated', () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const url = new URL(client.entities('public').urlFor({
+            expand: ['author', 'hero', 'sections.*.image'],
+        }))
+        expect(url.searchParams.get('expand')).toBe('author,hero,sections.*.image')
+    })
+
+    it('omits expand when the array is empty or absent', () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const u1 = new URL(client.entities('public').urlFor({ expand: [] }))
+        const u2 = new URL(client.entities('public').urlFor({}))
+        expect(u1.searchParams.get('expand')).toBe(null)
+        expect(u2.searchParams.get('expand')).toBe(null)
+    })
+
+    it('accepts canonical ($-prefixed) and normalized expand paths verbatim', () => {
+        // The api accepts both forms (ADR-0007 B3); the SDK passes through.
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const url = new URL(client.entities('public').urlFor({
+            expand: ['$author', 'hero'],
+        }))
+        expect(url.searchParams.get('expand')).toBe('$author,hero')
+    })
+})
+
+describe('entities().list with expand', () => {
+    it('GETs with expand serialized in the URL when paths are provided', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: { items: [{ id: '/a.md', meta: { author: { name: 'Dick' } } }], total: 1 } }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list({
+            filter: { 'meta.published': true },
+            expand: ['author', 'hero'],
+        })
+
+        const [url, init] = fetch.calls[0]
+        const parsed = new URL(url)
+        expect(parsed.pathname).toBe('/api/public/entities')
+        expect(parsed.searchParams.get('expand')).toBe('author,hero')
+        expect(init.method).toBe('GET')
+    })
+
+    it('forwards expand in the POST body when forced via opts.method = "POST"', async () => {
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: { items: [], total: 0 } }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list(
+            { filter: { 'meta.published': true }, expand: ['author.organization'] },
+            { method: 'POST' },
+        )
+
+        const [url, init] = fetch.calls[0]
+        expect(url).toBe('http://x/api/public/entities/query')
+        expect(init.method).toBe('POST')
+        const body = JSON.parse(init.body)
+        expect(body.expand).toEqual(['author.organization'])
+    })
+})
+
+// Verifies the nginx fast-path contract (ADR-0007 caching section): the
+// SDK computes the same hash the server would, appends it as `?cache=...`
+// on GET requests, and the server strips it before hashing — meaning
+// nginx can `try_files .../$arg_cache.json @proxy` without Lua.
+import { createHash } from 'node:crypto'
+function expectedHashFor(searchString) {
+    return createHash('sha256').update(searchString).digest('hex').slice(0, 16)
+}
+
+describe('entities().cacheKeyFor', () => {
+
+    it('matches the server algorithm for a simple query', async () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const key = await client.entities('public').cacheKeyFor({ expand: ['author'] })
+        expect(key).toBe(expectedHashFor('expand=author'))
+    })
+
+    it('matches the server algorithm for a multi-param query', async () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const key = await client.entities('public').cacheKeyFor({
+            limit:  10,
+            sort:   { 'meta.date': -1 },
+            filter: { 'meta.published': true },
+        })
+        // The serialization is fixed by buildQueryParams: page, limit,
+        // skip, sort, fields, expand, then filter keys. limit first,
+        // then sort, then the meta.published filter.
+        expect(key).toBe(expectedHashFor('limit=10&sort=-meta.date&meta.published=true'))
+    })
+
+    it('returns "index" for an empty query', async () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const key = await client.entities('public').cacheKeyFor({})
+        expect(key).toBe('index')
+    })
+
+    it('is a 16-char lowercase hex string for non-empty queries', async () => {
+        const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+        const key = await client.entities('public').cacheKeyFor({ limit: 1 })
+        expect(key).toMatch(/^[0-9a-f]{16}$/)
+    })
+})
+
+describe('entities().list adds the cache routing hint to the GET URL', () => {
+    it('appends &cache=<hash> when the query has params', async () => {
+        const fetch = scriptedFetch([() => fakeResponse({ json: { items: [] } })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list({ expand: ['author'] })
+
+        const [url] = fetch.calls[0]
+        const parsed = new URL(url)
+        expect(parsed.searchParams.get('expand')).toBe('author')
+        expect(parsed.searchParams.get('cache')).toMatch(/^[0-9a-f]{16}$/)
+    })
+
+    it('omits the cache param when the query is empty (server caches it as `index.json`)', async () => {
+        const fetch = scriptedFetch([() => fakeResponse({ json: { items: [] } })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list({})
+
+        const [url] = fetch.calls[0]
+        // No query string at all — nginx try_files falls through to the
+        // configured `index.json` fallback path.
+        expect(url).toBe('http://x/api/public/entities')
+    })
+
+    it('does NOT add the cache param when forced through the POST fallback', async () => {
+        const fetch = scriptedFetch([() => fakeResponse({ json: { items: [] } })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list(
+            { filter: { 'meta.published': true } },
+            { method: 'POST' },
+        )
+
+        const [url, init] = fetch.calls[0]
+        expect(init.method).toBe('POST')
+        expect(url).toBe('http://x/api/public/entities/query')   // no ?cache=
+    })
+
+    it('the SDK-computed cache key on a GET URL matches what the server would compute for the same request', async () => {
+        // Round-trip check against the server's own cache-naming
+        // algorithm: parse the URL the SDK fetched, strip `cache` (as
+        // the server's cacheNameForQueryString does), hash the
+        // remainder, and verify it matches the `cache` param that the
+        // SDK appended. This is what makes nginx try_files land on
+        // the right file without server cooperation.
+        const fetch = scriptedFetch([() => fakeResponse({ json: { items: [] } })])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+        await client.entities('public').list({
+            limit:  5,
+            sort:   { 'meta.date': -1 },
+            expand: ['author', 'hero'],
+            filter: { 'meta.published': true },
+        })
+
+        const [url] = fetch.calls[0]
+        const parsed = new URL(url)
+        const sdkSentHash = parsed.searchParams.get('cache')
+        expect(sdkSentHash).toMatch(/^[0-9a-f]{16}$/)
+
+        // Compute what the server would compute: strip `cache`,
+        // serialize, hash.
+        const serverParams = new URLSearchParams(parsed.searchParams)
+        serverParams.delete('cache')
+        const serverHash = expectedHashFor(serverParams.toString())
+        expect(sdkSentHash).toBe(serverHash)
+    })
+
+    // expectedHash helper duplicated here so the test stays self-contained.
+    function expectedHashFor(searchString) {
+        return createHash('sha256').update(searchString).digest('hex').slice(0, 16)
+    }
 })
 
 describe('entities().listAll', () => {

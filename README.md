@@ -227,6 +227,100 @@ Response envelope: `{ items, page, limit, total, totalPages, hasNext, hasPrev }`
 
 Use dotted-path keys for nested fields (`'meta.price': { $gt: 20 }`). Nested object literals (`{ meta: { price: { $gt: 20 } } }`) are interpreted as deep-equality — same gotcha as Mongo.
 
+### `expand` — inline-resolve referenced entities in one trip
+
+Mikser entities can carry references to other entities via `$`-prefixed front-matter keys ([ADR-0007](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/decisions/0007-references-declaration-and-expansion.md)). On the wire, the SDK projects them back to plain names — so a document with `$author: /authors/dick` in YAML shows up as `meta.author = '/authors/dick'` in the response. **Always**: every response has `$`-keys stripped, regardless of whether you asked for expansion. The convention is engine-side; the wire shape is clean.
+
+Pass `expand: [...]` to inline the resolved entity in place of the ref string — multi-hop graph fetches collapse to one round-trip.
+
+```js
+// Source on the server:
+//   ---
+//   layout: article
+//   title: Launch
+//   $author:  /authors/dick
+//   $hero:    /images/launch-hero
+//   $related: ['/blog/follow-up', '/blog/changelog']
+//   ---
+
+// Without expand — refs come back as strings (normalized form: no $).
+const { items } = await docs.list({ filter: { id: '/blog/launch.md' } })
+items[0].meta.author    // '/authors/dick'          — string
+items[0].meta.hero      // '/images/launch-hero'    — string
+items[0].meta.related   // ['/blog/follow-up', '/blog/changelog']
+
+// With expand — refs come back as full entity objects.
+const { items: hydrated } = await docs.list({
+    filter: { id: '/blog/launch.md' },
+    expand: ['author', 'hero'],
+})
+hydrated[0].meta.author.meta.name   // 'Dick Marinov'
+hydrated[0].meta.hero.meta.alt      // 'Launch screen hero'
+```
+
+**Multi-hop chains** — dot-notation walks through expanded entities:
+
+```js
+const { items } = await docs.list({
+    filter: { id: '/blog/launch.md' },
+    expand: ['author.organization'],
+})
+items[0].meta.author.meta.organization.meta.name   // 'Almero Digital'
+```
+
+Each segment in the path that lands on a `$`-keyed field gets expanded. The path also expands every intermediate hop — `expand: ['author.organization']` expands `$author` AND walks into the resolved author's `$organization`.
+
+**Array iteration with `*`** — for sections, related lists, or any `$`-keyed array:
+
+```js
+// $related: ['/blog/follow-up', '/blog/changelog']
+expand: ['related']
+// → meta.related[0] and meta.related[1] are full entity objects
+
+// Mixed nesting + iteration — landing page with section blocks:
+//   sections:
+//     - { type: hero,     $image: /images/hero }
+//     - { type: features, $image: /images/feat-a }
+expand: ['sections.*.image']
+// → each section's $image becomes the resolved image entity
+```
+
+**Multiple paths in one call**:
+
+```js
+const { items } = await docs.list({
+    filter: { id: '/landing.md' },
+    expand: [
+        'hero',
+        'sections.*.image',
+        'sections.*.cta.target',
+        'author.organization',
+    ],
+})
+```
+
+**Path forms** — the SDK accepts both `'author'` (normalized) and `'$author'` (canonical) and forwards either to the api, which accepts both. Use whichever feels natural at the call site; they're equivalent.
+
+**Server-side caps** — exceeding any cap returns a `MikserError` with `status === 422`:
+
+| Cap | Default | Configured at | What triggers it |
+|---|---|---|---|
+| `maxDepth` | 5 | `api.expand.maxDepth` | One path is longer than this (`a.b.c.d.e.f` at default) |
+| `maxPaths` | 20 | `api.expand.maxPaths` | The `expand` array has more entries than this |
+| `maxResolved` | 100 | `api.expand.maxResolved` | Total entity lookups for the request (across all paths) exceeded |
+
+```js
+try {
+    await docs.list({ filter: {...}, expand: tooManyPaths })
+} catch (err) {
+    if (err.status === 422) { /* tighten the expand spec */ }
+}
+```
+
+**Missing targets and cycles are silently left as strings.** If `$author: /authors/missing` doesn't resolve, the response carries `meta.author === '/authors/missing'` — a string at the position you asked to expand. Same shape for cycle breaks. Per ADR-0007 B6 this is by design: the response shape stays consistent, and "string where we asked for an object" is the unambiguous signal that resolution stopped there.
+
+**Transport**: same GET-first strategy as the rest of `list()` — `expand` is serialized as a comma-separated URL param when the request fits in the URL, falls back to POST body otherwise. CDN caching works the same way on either form; the `expand` value is part of the cache key.
+
 ### `urlFor(query)` — GET-form URL
 
 Build a URL for the GET form of the same query. Useful when the response should be CDN-cacheable, or you want a sharable link.
@@ -235,10 +329,36 @@ Build a URL for the GET form of the same query. Useful when the response should 
 const url = docs.urlFor({
     filter: { 'meta.published': true, 'meta.price': { $gt: 20 } },
     sort:   { 'meta.date': -1 },
+    expand: ['author', 'hero'],
     limit:  10,
 })
-// http://localhost:3001/api/public/entities?meta.published=true&meta.price.$gt=20&sort=-meta.date&limit=10
+// http://localhost:3001/api/public/entities?
+//   meta.published=true&meta.price.$gt=20&sort=-meta.date&expand=author,hero&limit=10
 ```
+
+`expand` is serialized as a comma-separated value so the URL is a stable cache key — same response for the same URL across requests and CDN nodes.
+
+### `cacheKeyFor(query)` — the nginx fast-path hint
+
+The api plugin caches GET responses to disk under a filename derived from the query. Both server and SDK hash the same query the same way, so `list()` appends `&cache=<hash>` to its GET URL automatically — nginx can then serve cached files via `try_files` without computing the hash itself (no Lua, no rewrite module). See the [api plugin's caching docs](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/caching.md) for the full nginx config.
+
+```js
+const query = {
+    filter: { 'meta.published': true },
+    expand: ['author'],
+    limit:  10,
+}
+const key = await docs.cacheKeyFor(query)
+// '4f3a2c1d8e9b6f7a'  (16 hex chars; same value the server uses on disk)
+
+// Compose a cacheable URL by hand (rare — list() does this automatically).
+// urlFor() guarantees a `?` because the query has params; for the empty-
+// query case `cacheKeyFor()` returns `'index'` and you'd skip appending
+// `cache` (the server stores empty-query responses as `index.json`).
+const url = docs.urlFor(query) + '&cache=' + key
+```
+
+Returns `'index'` for empty queries — the server stores that case under `index.json`, the conventional default-snapshot name a `try_files` directive falls through to. The server strips the `cache` param before computing its own hash, so a wrong/stale client value just causes a cache miss in nginx (graceful fallback to mikser); no poisoning is possible because the server is always the source of truth for filename choice.
 
 ### `pages(query)` — async iterator
 
@@ -249,6 +369,8 @@ for await (const env of docs.pages({ filter: { type: 'document' }, limit: 50 }))
     }
 }
 ```
+
+`pages()` and `listAll()` both accept `expand` in the query — the parameter applies to every page in the iteration. For sitemap-style enumeration with one-hop hydration (`expand: ['author']`), this keeps the build to one round-trip per page rather than N per entity.
 
 ### `watch(query, { signal })` — live subscription via SSE
 
@@ -293,6 +415,7 @@ const dispose = docs.live(
     {
         sort:    { 'meta.date': -1 },
         fields:  ['id', 'meta.title', 'meta.date', 'meta.summary'],
+        expand:  ['author', 'hero'],         // hydrate refs on the initial snapshot
         limit:   20,
         signal:  abortController?.signal,    // optional external abort
         onError: err => console.error(err),  // optional error sink
@@ -302,6 +425,8 @@ const dispose = docs.live(
 // Later:
 dispose()
 ```
+
+**`expand` and SSE deltas.** When passed in `options`, `expand` is applied to the *initial* snapshot. The SSE delta stream that follows emits raw entities — a `create` or `update` event replaces the previously-expanded item with the unexpanded shape until the next refetch. If you need always-expanded items through live updates, call `list({ ..., expand })` on the cadence you care about instead, or wait for server-side expand-on-subscribe (not shipped yet — track ADR-0007 follow-ups).
 
 Equivalent to:
 

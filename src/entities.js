@@ -7,6 +7,36 @@ import { bearer, jsonOrThrow } from './http.js'
 import { joinUrl, sortToParam, filterToParams } from './url.js'
 import { parseSseEvent } from './sse.js'
 
+// Build the URLSearchParams body that both `urlFor()` and `cacheKeyFor()`
+// serialize. Extracted as a helper so the two paths can't drift — the
+// cache-key hash MUST be computed against the same byte sequence the
+// GET URL carries, otherwise client and server will land on different
+// filenames.
+function buildQueryParams(query, params) {
+    const { filter, sort, fields, page, limit, skip, expand } = query
+    if (page  != null) params.set('page',  String(page))
+    if (limit != null) params.set('limit', String(limit))
+    if (skip  != null) params.set('skip',  String(skip))
+    if (sort)   params.set('sort',   sortToParam(sort))
+    if (fields) params.set('fields', fields.join(','))
+    if (expand && expand.length) params.set('expand', expand.join(','))
+    if (filter) filterToParams(filter, params)
+}
+
+// First 16 hex chars of sha256(str) — matches the server's algorithm in
+// `cacheNameForQueryString`. Uses the standard Web Crypto API which is
+// available in browsers and Node 18+ as `globalThis.crypto.subtle`.
+async function sha256HexPrefix16(str) {
+    const bytes = new TextEncoder().encode(str)
+    const buf = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+    const arr = new Uint8Array(buf)
+    let hex = ''
+    for (let i = 0; i < 8; i++) {
+        hex += arr[i].toString(16).padStart(2, '0')
+    }
+    return hex
+}
+
 // Conservative URL-length ceiling for the GET form of list(). Real
 // browsers and proxies vary (Chrome ~32k, IIS ~16k, nginx default
 // 8k, some CDNs 4k), but the safest interop floor for list-with-
@@ -218,8 +248,25 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             const forcePost = opts.method === 'POST'
 
             if (!forcePost) {
-                const url = urlFor(query)
+                let url = urlFor(query)
                 if (url.length <= GET_MAX_URL) {
+                    // Append the cache-key routing hint per the nginx
+                    // try_files contract. Server strips this param
+                    // before hashing the query, so client and server
+                    // agree on the cache filename. Without this hint
+                    // nginx can't serve cache files directly (it would
+                    // need Lua to compute the hash from $args). See
+                    // ADR-0007 §B9 and the api plugin's
+                    // cacheNameForQueryString comment block.
+                    //
+                    // Skipped when there's nothing to hash (empty
+                    // query → 'index.json' on the server).
+                    const cacheKey = await cacheKeyFor(query)
+                    if (cacheKey !== 'index') {
+                        url = url.includes('?')
+                            ? `${url}&cache=${cacheKey}`
+                            : `${url}?cache=${cacheKey}`
+                    }
                     const res = await doFetch(url, {
                         method: 'GET',
                         headers: {
@@ -253,17 +300,45 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
          * Build a URL for the GET form of the same query — useful when
          * the response should be CDN-cacheable, or when the caller wants
          * a sharable link. Operators map to `.$op` URL-param suffixes.
+         *
+         * `expand` is serialized as a comma-separated list per ADR-0007
+         * B7 (api keeps the GET form cache-stable). Paths can use either
+         * canonical (`$author`) or normalized (`author`) form — the api
+         * accepts both. Each entry walks $-keyed reference fields and
+         * inlines the resolved entity in the response. Use `*` for array
+         * iteration: `['sections.*.image']`.
          */
         function urlFor(query = {}) {
             const url = new URL(listUrl)
-            const { filter, sort, fields, page, limit, skip } = query
-            if (page  != null) url.searchParams.set('page',  String(page))
-            if (limit != null) url.searchParams.set('limit', String(limit))
-            if (skip  != null) url.searchParams.set('skip',  String(skip))
-            if (sort)   url.searchParams.set('sort',   sortToParam(sort))
-            if (fields) url.searchParams.set('fields', fields.join(','))
-            if (filter) filterToParams(filter, url.searchParams)
+            buildQueryParams(query, url.searchParams)
             return url.toString()
+        }
+
+        /**
+         * Compute the cache-routing-hint key for a query — the same hash
+         * the server would store the response under. Use it to build a
+         * URL that nginx can serve from disk via:
+         *
+         *     try_files /api/<endpoint>/entities/$arg_cache.json @proxy
+         *
+         * The default `list()` already appends this automatically. Call
+         * `cacheKeyFor()` directly when you need the bare hash — e.g.
+         * to build a cacheable URL for a sharable link or for a custom
+         * fetch path. Returns `'index'` when the query has no params
+         * (the server caches that case under `index.json`).
+         *
+         * Algorithm: build the same URLSearchParams `list()` would
+         * build, take its `.toString()`, sha256 the bytes, take the
+         * first 16 hex chars (64 bits). Server uses the same algorithm
+         * — collisions are vanishingly unlikely across realistic cache
+         * populations.
+         */
+        async function cacheKeyFor(query = {}) {
+            const params = new URLSearchParams()
+            buildQueryParams(query, params)
+            const search = params.toString()
+            if (!search) return 'index'
+            return await sha256HexPrefix16(search)
         }
 
         /**
@@ -340,6 +415,11 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
         async function* watch(query = {}, { signal } = {}) {
             const url = new URL(subscribeUrl)
             if (query.filter) filterToParams(query.filter, url.searchParams)
+            // Forward `expand` to the server so the graph-subscription
+            // path is engaged (the api delegates to runtime.refs and
+            // emits already-expanded entities). Without expand the SSE
+            // stream emits bare entities — existing behavior preserved.
+            if (query.expand?.length) url.searchParams.set('expand', query.expand.join(','))
 
             const res = await doFetch(url.toString(), {
                 method: 'GET',
@@ -407,6 +487,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
         function live(filter, onChange, options = {}) {
             const {
                 sort, fields, limit, skip,
+                expand,
                 quiet,
                 signal: externalSignal,
                 onError = (err) => console.error('mikser-io-sdk-api live error:', err),
@@ -477,13 +558,21 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                     if (!usedFastPath) {
                         // Pass { quiet } so list()'s wide-warning honors
                         // the live() caller's quiet opt.
-                        const env = await list({ filter, sort, fields, limit, skip }, { quiet })
+                        //
+                        // `expand` flows through to the initial snapshot
+                        // call AND to watch() below, so the server's
+                        // graph-subscription path (runtime.refs) emits
+                        // already-expanded entities on every mutation
+                        // within the expansion graph. Update events
+                        // replace items in place with the new expanded
+                        // shape, keeping the consumer's view consistent.
+                        const env = await list({ filter, sort, fields, limit, skip, expand }, { quiet })
                         if (disposed || ac.signal.aborted) return
                         items = env.items
                         onChange(items)
                     }
 
-                    for await (const event of watch({ filter }, { signal: ac.signal })) {
+                    for await (const event of watch({ filter, expand }, { signal: ac.signal })) {
                         if (disposed) return
                         switch (event.type) {
                             case 'create':
@@ -578,7 +667,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             return res.arrayBuffer()
         }
 
-        return { list, listAll, urlFor, pages, watch, live, update, delete: remove, render }
+        return { list, listAll, urlFor, cacheKeyFor, pages, watch, live, update, delete: remove, render }
     }
 }
 
