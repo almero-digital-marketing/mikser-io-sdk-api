@@ -372,6 +372,50 @@ for await (const env of docs.pages({ filter: { type: 'document' }, limit: 50 }))
 
 `pages()` and `listAll()` both accept `expand` in the query — the parameter applies to every page in the iteration. For sitemap-style enumeration with one-hop hydration (`expand: ['author']`), this keeps the build to one round-trip per page rather than N per entity.
 
+### `paginate(items, options)` — SSG sidecar helper
+
+Pure-function helper for mikser layout sidecars that paginate a static index page. Chunks items into pages and returns a shape that matches mikser's [layout pagination protocol](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/rendering.md) — return it from `load()` and the layouts plugin renders one page per chunk, with `entity.page` / `entity.pages` set on each render.
+
+```js
+// layouts/index.js
+import { paginate } from 'mikser-io-sdk-api'
+
+export async function load({ findEntities }) {
+    const posts = (await findEntities())
+        .filter(e => e.meta?.layout === 'post')
+        .sort((a, b) => new Date(b.meta?.date) - new Date(a.meta?.date))
+
+    return paginate(posts, { key: 'posts', pageSize: 6 })
+    // → { posts: [[...], [...], ...], pages: 4, pageNumbers: [...], pageSize: 6, totalItems: 20 }
+}
+```
+
+```hbs
+{{!-- layouts/index.hbs --}}
+<ul>
+    {{#each (lookup data.posts (subtract entity.page 1))}}
+        <li>{{this.meta.title}}</li>
+    {{/each}}
+</ul>
+
+<nav class="pagination">
+    {{#each data.pageNumbers}}
+        {{#if (eq this.num ../entity.page)}}
+            <span aria-current="page">{{this.num}}</span>
+        {{else}}
+            <a href="{{this.url}}">{{this.num}}</a>
+        {{/if}}
+    {{/each}}
+</nav>
+```
+
+Options:
+- `key` (default `'items'`) — name of the output array-of-arrays. Set to match your template's domain word (`posts`, `products`, `photos`).
+- `pageSize` (default `10`) — items per page. Positive integer.
+- `urlFor` (default `(p) => p === 1 ? '/' : '/<p>/'`) — build per-page hrefs. Override for non-root indexes (e.g. `(p) => p === 1 ? '/blog/' : '/blog/${p}/'`).
+
+The empty case is handled deliberately — an empty `items` array still returns `pages: 1` so the layout renders an "empty list" page rather than disappearing from the sitemap.
+
 ### `watch(query, { signal })` — live subscription via SSE
 
 Open a Server-Sent Events stream and yield events as matching entities change. The lowest-level real-time primitive — useful when you want raw events.

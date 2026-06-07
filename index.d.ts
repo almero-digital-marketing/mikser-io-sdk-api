@@ -270,3 +270,74 @@ export interface AssetIndex {
 export function createAssetIndex(
     assets: Array<{ id: string; meta?: Record<string, unknown> }>,
 ): AssetIndex
+
+/**
+ * Options for {@link paginate}.
+ */
+export interface PaginateOptions<TKey extends string = 'items'> {
+    /**
+     * Output key under which the pre-sliced pages array is returned.
+     * Use 'posts', 'products', 'photos' etc. so the template's
+     * variable name matches the content domain. Default: 'items'.
+     */
+    key?: TKey
+    /**
+     * Items per page. Default: 10. Must be a positive integer.
+     */
+    pageSize?: number
+    /**
+     * Builds the href for each page number. Defaults to the mikser
+     * convention where page 1 lives at `/` and page N at `/<N>/`.
+     */
+    urlFor?: (page: number) => string
+}
+
+/**
+ * One entry per page in the paginated nav.
+ */
+export interface PageNumber {
+    num: number
+    url: string
+}
+
+/**
+ * Return shape from {@link paginate}. The dynamic key (`items` by
+ * default) holds an array-of-arrays — index = `entity.page - 1`.
+ */
+export type PaginateResult<T, TKey extends string = 'items'> = {
+    [K in TKey]: T[][]
+} & {
+    pages:       number
+    pageSize:    number
+    pageNumbers: PageNumber[]
+    totalItems:  number
+}
+
+/**
+ * Chunk an array into pages for mikser's layout pagination protocol.
+ * A mikser layout sidecar that returns `{ pages: N, ... }` from
+ * `load()` causes the layouts plugin to render one page per N, with
+ * `entity.page` / `entity.pages` set on each render. This helper
+ * computes that protocol's shape so a sidecar doesn't have to.
+ *
+ * @example
+ *   // layouts/index.js
+ *   import { paginate } from 'mikser-io-sdk-api'
+ *
+ *   export async function load({ findEntities }) {
+ *       const posts = (await findEntities())
+ *           .filter(e => e.meta?.layout === 'post')
+ *           .sort((a, b) => new Date(b.meta?.date) - new Date(a.meta?.date))
+ *
+ *       return paginate(posts, { key: 'posts', pageSize: 6 })
+ *   }
+ *
+ *   // layouts/index.hbs
+ *   {{#each (lookup data.posts (subtract entity.page 1))}}
+ *       <li>{{this.meta.title}}</li>
+ *   {{/each}}
+ */
+export function paginate<T, TKey extends string = 'items'>(
+    items:   T[],
+    options?: PaginateOptions<TKey>,
+): PaginateResult<T, TKey>
