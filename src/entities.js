@@ -667,7 +667,116 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             return res.arrayBuffer()
         }
 
-        return { list, listAll, urlFor, cacheKeyFor, pages, watch, live, update, delete: remove, render }
+        /**
+         * Stateful paginator over list(). Each call to goTo / next /
+         * prev fetches ONE page from the server — the items the
+         * server returns are exactly the slice the user asked for.
+         * No upfront load of the full collection.
+         *
+         *   const paginator = docs.paginator({
+         *       filter:   { 'meta.layout': 'post' },
+         *       sort:     { 'meta.date': -1 },
+         *       pageSize: 10,
+         *   })
+         *   await paginator.goTo(1)
+         *   paginator.items, paginator.page, paginator.pages, paginator.hasNext
+         *   await paginator.next()
+         *
+         * State accessors are getters — the value you read is always
+         * the result of the last completed fetch. Wrap in your
+         * framework's reactive primitive (useState / ref / store) to
+         * re-render when navigation completes.
+         *
+         * @param {Object} [opts]
+         * @param {Object} [opts.filter]   Same as list() filter
+         * @param {Object} [opts.sort]     Same as list() sort
+         * @param {string[]} [opts.fields] Same as list() fields
+         * @param {string[]} [opts.expand] Same as list() expand
+         * @param {number} [opts.pageSize=10] Items per page
+         * @param {(page:number)=>string} [opts.urlFor] Builds the
+         *   href for each pageNumbers entry. Default matches mikser's
+         *   SSG convention (`/` for page 1, `/<N>/` for the rest).
+         */
+        function paginator({
+            pageSize = 10,
+            urlFor: urlForFn,
+            ...query
+        } = {}) {
+            if (!Number.isInteger(pageSize) || pageSize < 1) {
+                throw new TypeError(`paginator: pageSize must be a positive integer (got ${pageSize})`)
+            }
+
+            const buildUrl = urlForFn || ((p) => p === 1 ? '/' : `/${p}/`)
+
+            let state = {
+                page:       1,
+                items:      [],
+                pages:      1,
+                totalItems: 0,
+                loaded:     false,
+            }
+
+            function pageNumbers() {
+                const out = []
+                for (let p = 1; p <= state.pages; p++) {
+                    out.push({ num: p, url: buildUrl(p), isCurrent: p === state.page })
+                }
+                return out
+            }
+
+            async function goTo(page) {
+                if (!Number.isInteger(page) || page < 1) {
+                    throw new RangeError(`paginator.goTo: page must be a positive integer (got ${page})`)
+                }
+                const result = await list({
+                    ...query,
+                    page,
+                    limit: pageSize,
+                })
+                state = {
+                    page:       result.page       ?? page,
+                    items:      result.items      ?? [],
+                    pages:      result.totalPages ?? 1,
+                    totalItems: result.total      ?? 0,
+                    loaded:     true,
+                }
+                return api
+            }
+
+            async function next() {
+                if (!state.loaded) return goTo(1)
+                if (state.page >= state.pages) {
+                    throw new RangeError('paginator.next: already at the last page')
+                }
+                return goTo(state.page + 1)
+            }
+
+            async function prev() {
+                if (!state.loaded) return goTo(1)
+                if (state.page <= 1) {
+                    throw new RangeError('paginator.prev: already at the first page')
+                }
+                return goTo(state.page - 1)
+            }
+
+            const api = {
+                get items()       { return state.items },
+                get page()        { return state.page },
+                get pages()       { return state.pages },
+                get totalItems()  { return state.totalItems },
+                get pageSize()    { return pageSize },
+                get hasNext()     { return state.page < state.pages },
+                get hasPrev()     { return state.page > 1 },
+                get loaded()      { return state.loaded },
+                get pageNumbers() { return pageNumbers() },
+                goTo,
+                next,
+                prev,
+            }
+            return api
+        }
+
+        return { list, listAll, urlFor, cacheKeyFor, pages, paginator, watch, live, update, delete: remove, render }
     }
 }
 

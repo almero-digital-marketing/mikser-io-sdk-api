@@ -372,49 +372,50 @@ for await (const env of docs.pages({ filter: { type: 'document' }, limit: 50 }))
 
 `pages()` and `listAll()` both accept `expand` in the query — the parameter applies to every page in the iteration. For sitemap-style enumeration with one-hop hydration (`expand: ['author']`), this keeps the build to one round-trip per page rather than N per entity.
 
-### `paginate(items, options)` — SSG sidecar helper
+### `paginator(options)` — stateful client-side paginator
 
-Pure-function helper for mikser layout sidecars that paginate a static index page. Chunks items into pages and returns a shape that matches mikser's [layout pagination protocol](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/rendering.md) — return it from `load()` and the layouts plugin renders one page per chunk, with `entity.page` / `entity.pages` set on each render.
+Wraps `list()` with page-at-a-time state. Each navigation call (`goTo` / `next` / `prev`) fetches exactly **one page** from the server — no upfront load of the full collection. Right for UI navigation; use `pages()` or `listAll()` for SSG sitemap enumeration that needs every page.
 
 ```js
-// layouts/index.js
-import { paginate } from 'mikser-io-sdk-api'
+const docs = client.entities('public')
 
-export async function load({ findEntities }) {
-    const posts = (await findEntities())
-        .filter(e => e.meta?.layout === 'post')
-        .sort((a, b) => new Date(b.meta?.date) - new Date(a.meta?.date))
+const paginator = docs.paginator({
+    filter:   { 'meta.layout': 'post' },
+    sort:     { 'meta.date': -1 },
+    pageSize: 10,
+})
 
-    return paginate(posts, { key: 'posts', pageSize: 6 })
-    // → { posts: [[...], [...], ...], pages: 4, pageNumbers: [...], pageSize: 6, totalItems: 20 }
-}
+await paginator.goTo(1)         // one HTTP request → first 10 items
+paginator.items                  // those 10 items
+paginator.page                   // 1
+paginator.pages                  // total page count (server-computed)
+paginator.totalItems             // total item count
+paginator.hasNext, hasPrev
+paginator.pageNumbers            // [{ num, url, isCurrent }, ...]
+
+await paginator.next()           // one HTTP request → items 11..20
+await paginator.goTo(5)          // one HTTP request → items 41..50
 ```
 
-```hbs
-{{!-- layouts/index.hbs --}}
-<ul>
-    {{#each (lookup data.posts (subtract entity.page 1))}}
-        <li>{{this.meta.title}}</li>
-    {{/each}}
-</ul>
-
-<nav class="pagination">
-    {{#each data.pageNumbers}}
-        {{#if (eq this.num ../entity.page)}}
-            <span aria-current="page">{{this.num}}</span>
-        {{else}}
-            <a href="{{this.url}}">{{this.num}}</a>
-        {{/if}}
-    {{/each}}
-</nav>
-```
+State accessors are getters — the value you read is always the result of the last completed fetch. Wrap in your framework's reactive primitive (React's `useState`, Vue's `ref`, Svelte stores) to re-render when navigation completes.
 
 Options:
-- `key` (default `'items'`) — name of the output array-of-arrays. Set to match your template's domain word (`posts`, `products`, `photos`).
+- `filter`, `sort`, `fields`, `expand` — same shape as `list()`. Applied on every page fetch.
 - `pageSize` (default `10`) — items per page. Positive integer.
-- `urlFor` (default `(p) => p === 1 ? '/' : '/<p>/'`) — build per-page hrefs. Override for non-root indexes (e.g. `(p) => p === 1 ? '/blog/' : '/blog/${p}/'`).
+- `urlFor` (default `(p) => p === 1 ? '/' : '/<p>/'`) — build per-page hrefs for the `pageNumbers` array. Override for SPA hash routing (`(p) => '#/page/' + p`) or query-param style (`(p) => '?page=' + p`).
 
-The empty case is handled deliberately — an empty `items` array still returns `pages: 1` so the layout renders an "empty list" page rather than disappearing from the sitemap.
+Errors thrown by `next()` at the last page, `prev()` at the first page, and `goTo()` on an invalid page number — so a UI layer can disable nav controls based on `hasNext` / `hasPrev` rather than catch.
+
+#### vs. `list()` directly
+
+| Use | Pattern |
+|---|---|
+| One-shot fetch of a specific page | `await docs.list({ filter, page: 3, limit: 10 })` |
+| Stateful UI navigation | `const p = docs.paginator({ ... }); await p.next()` |
+| Server enumeration (SSG, indexing) | `for await (const env of docs.pages({ filter }))` |
+| Live-updating feed | `docs.live(filter, onChange)` |
+
+`paginator` is sugar over `list` for the most common UI pattern — keeps the "current page" out of your component state.
 
 ### `watch(query, { signal })` — live subscription via SSE
 

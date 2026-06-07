@@ -139,6 +139,60 @@ export interface LiveOptions {
     onError?: (err: unknown) => void
 }
 
+/**
+ * Options for {@link EntitiesClient.paginator}.
+ */
+export interface PaginatorOptions extends Omit<ListQuery, 'page' | 'limit' | 'skip'> {
+    /** Items per page. Default: 10. Must be a positive integer. */
+    pageSize?: number
+    /**
+     * Builds the href for each pageNumbers entry. Defaults to mikser's
+     * SSG URL convention — page 1 at `/`, page N at `/<N>/`.
+     */
+    urlFor?: (page: number) => string
+}
+
+/**
+ * One entry in the paginator's pageNumbers array — usable directly
+ * by pagination nav components.
+ */
+export interface PageNumber {
+    num: number
+    url: string
+    isCurrent: boolean
+}
+
+/**
+ * Stateful paginator returned from {@link EntitiesClient.paginator}.
+ * Each navigation method (goTo / next / prev) fetches ONE page from
+ * the server. State accessors are getters — the value you read is
+ * always the result of the last completed fetch.
+ */
+export interface Paginator<T = unknown> {
+    /** Items in the current page. Empty until goTo() / next() has resolved. */
+    readonly items: T[]
+    /** Current page number (1-indexed). 1 before the first fetch. */
+    readonly page: number
+    /** Total page count (server-computed). 1 before the first fetch. */
+    readonly pages: number
+    /** Total item count across all pages (server-computed). */
+    readonly totalItems: number
+    /** Page size used for all fetches. */
+    readonly pageSize: number
+    readonly hasNext: boolean
+    readonly hasPrev: boolean
+    /** True after the first successful fetch. */
+    readonly loaded: boolean
+    /** Per-page nav entries — `[{ num, url, isCurrent }, ...]`. */
+    readonly pageNumbers: PageNumber[]
+    /** Fetch a specific page. Throws on invalid page number. */
+    goTo(page: number): Promise<Paginator<T>>
+    /** Fetch the next page. Throws if already at the last page. */
+    next(): Promise<Paginator<T>>
+    /** Fetch the previous page. Throws if already at the first page. */
+    prev(): Promise<Paginator<T>>
+}
+
 export interface EntitiesClient {
     /** POST /entities/query — body-based, supports any sift filter. */
     list<T = unknown>(query?: ListQuery): Promise<ListEnvelope<T>>
@@ -153,6 +207,13 @@ export interface EntitiesClient {
      * for catalogs too large to hold in memory.
      */
     listAll<T = unknown>(query?: ListQuery): Promise<T[]>
+    /**
+     * Stateful paginator over list(). Each goTo / next / prev fetches
+     * ONE page from the server — no upfront load of the full
+     * collection. Right for UI navigation; wrong for SSG sitemap
+     * enumeration (use pages() or listAll() for that).
+     */
+    paginator<T = unknown>(options?: PaginatorOptions): Paginator<T>
     /**
      * Open an SSE stream and yield events as matching entities change.
      * Compose with list() for initial state, then watch() for updates.
@@ -271,73 +332,3 @@ export function createAssetIndex(
     assets: Array<{ id: string; meta?: Record<string, unknown> }>,
 ): AssetIndex
 
-/**
- * Options for {@link paginate}.
- */
-export interface PaginateOptions<TKey extends string = 'items'> {
-    /**
-     * Output key under which the pre-sliced pages array is returned.
-     * Use 'posts', 'products', 'photos' etc. so the template's
-     * variable name matches the content domain. Default: 'items'.
-     */
-    key?: TKey
-    /**
-     * Items per page. Default: 10. Must be a positive integer.
-     */
-    pageSize?: number
-    /**
-     * Builds the href for each page number. Defaults to the mikser
-     * convention where page 1 lives at `/` and page N at `/<N>/`.
-     */
-    urlFor?: (page: number) => string
-}
-
-/**
- * One entry per page in the paginated nav.
- */
-export interface PageNumber {
-    num: number
-    url: string
-}
-
-/**
- * Return shape from {@link paginate}. The dynamic key (`items` by
- * default) holds an array-of-arrays — index = `entity.page - 1`.
- */
-export type PaginateResult<T, TKey extends string = 'items'> = {
-    [K in TKey]: T[][]
-} & {
-    pages:       number
-    pageSize:    number
-    pageNumbers: PageNumber[]
-    totalItems:  number
-}
-
-/**
- * Chunk an array into pages for mikser's layout pagination protocol.
- * A mikser layout sidecar that returns `{ pages: N, ... }` from
- * `load()` causes the layouts plugin to render one page per N, with
- * `entity.page` / `entity.pages` set on each render. This helper
- * computes that protocol's shape so a sidecar doesn't have to.
- *
- * @example
- *   // layouts/index.js
- *   import { paginate } from 'mikser-io-sdk-api'
- *
- *   export async function load({ findEntities }) {
- *       const posts = (await findEntities())
- *           .filter(e => e.meta?.layout === 'post')
- *           .sort((a, b) => new Date(b.meta?.date) - new Date(a.meta?.date))
- *
- *       return paginate(posts, { key: 'posts', pageSize: 6 })
- *   }
- *
- *   // layouts/index.hbs
- *   {{#each (lookup data.posts (subtract entity.page 1))}}
- *       <li>{{this.meta.title}}</li>
- *   {{/each}}
- */
-export function paginate<T, TKey extends string = 'items'>(
-    items:   T[],
-    options?: PaginateOptions<TKey>,
-): PaginateResult<T, TKey>

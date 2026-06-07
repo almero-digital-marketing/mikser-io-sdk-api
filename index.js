@@ -66,4 +66,3 @@ export { MikserError }
 export { generateMikserRoutes } from './src/routes.js'
 export { createHrefIndex }      from './src/href.js'
 export { createAssetIndex }     from './src/asset.js'
-export { paginate }             from './src/paginate.js'
