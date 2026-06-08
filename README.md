@@ -305,9 +305,9 @@ const { items } = await docs.list({
 
 | Cap | Default | Configured at | What triggers it |
 |---|---|---|---|
-| `maxDepth` | 5 | `api.expand.maxDepth` | One path is longer than this (`a.b.c.d.e.f` at default) |
-| `maxPaths` | 20 | `api.expand.maxPaths` | The `expand` array has more entries than this |
-| `maxResolved` | 100 | `api.expand.maxResolved` | Total entity lookups for the request (across all paths) exceeded |
+| `maxDepth` | 5 | `catalog.expand.maxDepth` | One path is longer than this (`a.b.c.d.e.f` at default) |
+| `maxPaths` | 20 | `catalog.expand.maxPaths` | The `expand` array has more entries than this |
+| `maxResolved` | 100 | `catalog.expand.maxResolved` | Total entity lookups for the request (across all paths) exceeded |
 
 ```js
 try {
