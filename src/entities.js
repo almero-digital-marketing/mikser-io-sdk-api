@@ -51,7 +51,7 @@ const GET_MAX_URL = 1800
 // console). Server-side has a matching warning that fires for all
 // clients regardless of SDK use.
 const WIDE_RESPONSE_ITEMS = 50
-const _warnedShapes = new Set()
+const warnedShapes = new Set()
 
 function isProductionEnv() {
     try {
@@ -74,8 +74,8 @@ function maybeWarnWide({ endpoint, query, envelopeOrItems, quiet }) {
     const hasFields = Array.isArray(query?.fields) && query.fields.length > 0
     if (hasFields) return
     const shape = `${endpoint}|${JSON.stringify(query?.filter ?? null)}|${JSON.stringify(query?.sort ?? null)}`
-    if (_warnedShapes.has(shape)) return
-    _warnedShapes.add(shape)
+    if (warnedShapes.has(shape)) return
+    warnedShapes.add(shape)
     let sizeNote = ''
     try {
         const bytes = JSON.stringify(items).length
@@ -100,7 +100,7 @@ function maybeWarnWide({ endpoint, query, envelopeOrItems, quiet }) {
 // calls without noticing the snapshot is no longer involved. Deduped
 // per (endpoint, kind, what-was-set) so a page with 3 filtered calls
 // produces 3 warnings, not 30.
-const _bypassedShapes = new Set()
+const bypassedShapes = new Set()
 function maybeWarnSnapshotBypass({ endpoint, kind, filter, sort, skip, quiet }) {
     if (quiet || isProductionEnv() || isQuiet()) return
     const reasons = []
@@ -110,8 +110,8 @@ function maybeWarnSnapshotBypass({ endpoint, kind, filter, sort, skip, quiet }) 
     if (reasons.length === 0) return
     const reasonLabel = reasons.join('+')
     const shape = `${endpoint}|${kind}|${reasonLabel}`
-    if (_bypassedShapes.has(shape)) return
-    _bypassedShapes.add(shape)
+    if (bypassedShapes.has(shape)) return
+    bypassedShapes.add(shape)
     const fallback = kind === 'live' ? 'live list()' : 'paginated fetch'
     console.warn(
         `[mikser-sdk] data.catalog is set on "${endpoint}" but this ${kind}() call uses ${reasonLabel} — snapshot bypassed, falling back to ${fallback}.\n` +
