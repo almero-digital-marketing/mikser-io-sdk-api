@@ -776,7 +776,7 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
             return api
         }
 
-        return { list, listAll, urlFor, cacheKeyFor, pages, paginator, watch, live, update, delete: remove, render }
+        return { list, listAll, urlFor, cacheKeyFor, pages, paginator, watch, live, update, delete: remove, render, baseUrl }
     }
 }
 

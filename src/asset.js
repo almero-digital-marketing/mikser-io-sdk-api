@@ -1,65 +1,53 @@
-// Asset metadata index — pure data version. Framework SDKs wrap this
-// in their own reactivity primitives and expose useAsset on top.
-//
-// When assets carry metadata the template needs (dimensions, srcset,
-// alt text), looking them up by reference is cleaner than re-fetching
-// per render. The convention is that asset entities have an `id`
-// (used as the reference key) plus a `meta` block with the metadata.
+// Asset URLs + metadata — format-neutral. mikser's assets() plugin is a
+// preset transcoder (video, image, pdf, audio, …), not an image pipeline,
+// so neither is this: it models a (source, preset) → derivative-URL
+// convention plus an opaque metadata lookup. Image-specific concerns
+// (srcset, dimensions, <img> props) are a consumer concern — build them
+// on top of `meta` where you actually know an asset is an image.
+import { joinUrl } from './url.js'
 
 /**
- * @param {Array<{id: string, meta?: object}>} assets  Asset entities.
- * @returns {{
- *   asset: (ref: string) => AssetRecord|null,
- *   image: (ref: string) => ImageProps|null,
- *   map: Record<string, AssetRecord>,
- * }}
+ * URL of a transcoded derivative, by the assets() plugin convention:
  *
- * @typedef {Object} AssetRecord
- * @property {string} url
- * @property {number|undefined} width
- * @property {number|undefined} height
- * @property {string|undefined} srcset
- * @property {string|undefined} alt
- * @property {object|undefined} meta   The raw meta block, for downstream use.
+ *   <baseUrl>/assets/<preset>/<source>
  *
- * @typedef {Object} ImageProps
- * @property {string} src
- * @property {number|undefined} width
- * @property {number|undefined} height
- * @property {string|undefined} srcset
- * @property {string|undefined} alt
+ * `source` is the source ref, e.g. `/media/bg/clip.mp4`. `ext`, when
+ * given, is the preset's output format and REPLACES the source extension
+ * (a poster preset turns .mp4 → .jpg); omit it to keep the source ext.
+ * `baseUrl` is optional — omit for a same-origin, root-relative URL.
+ *
+ * @param {string} source
+ * @param {string} preset
+ * @param {{ baseUrl?: string, ext?: string }} [options]
+ * @returns {string}
+ */
+export function assetUrl(source, preset, { baseUrl = '', ext } = {}) {
+    if (!source || !preset) return ''
+    const file = ext ? source.replace(/\.[^./]+$/, `.${ext}`) : source
+    const path = `/assets/${preset}/${file.replace(/^\/+/, '')}`
+    return baseUrl ? joinUrl(baseUrl, path) : path
+}
+
+/**
+ * Format-neutral lookup for managed asset entities that carry their own
+ * URL/metadata. `asset(ref)` → `{ url, meta }` | null, keyed by entity
+ * `id`. `meta` is the entity's raw meta block, opaque — mime, dimensions,
+ * duration, whatever the preset emitted. No image semantics: a consumer
+ * that knows an asset is an image reads `meta.width`/`meta.srcset` itself.
+ *
+ * @param {Array<{id: string, meta?: object}>} assets
+ * @returns {{ asset: (ref: string) => ({url: string, meta?: object}|null), map: Record<string, {url: string, meta?: object}> }}
  */
 export function createAssetIndex(assets) {
     const map = {}
     if (Array.isArray(assets)) {
         for (const a of assets) {
             if (!a?.id) continue
-            map[a.id] = {
-                url:    a.meta?.destination ?? a.meta?.url ?? a.id,
-                width:  a.meta?.width,
-                height: a.meta?.height,
-                srcset: a.meta?.srcset,
-                alt:    a.meta?.alt,
-                meta:   a.meta,
-            }
+            map[a.id] = { url: a.meta?.destination ?? a.meta?.url ?? a.id, meta: a.meta }
         }
     }
-
-    function asset(ref) {
-        return map[ref] ?? null
+    return {
+        asset: (ref) => map[ref] ?? null,
+        map,
     }
-
-    function image(ref) {
-        const a = map[ref]
-        if (!a) return null
-        return {
-            src:    a.url,
-            width:  a.width,
-            height: a.height,
-            srcset: a.srcset,
-            alt:    a.alt,
-        }
-    }
-
-    return { asset, image, map }
 }

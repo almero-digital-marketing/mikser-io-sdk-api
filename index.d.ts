@@ -302,31 +302,34 @@ export function createHrefIndex(
 
 export interface AssetRecord {
     url: string
-    width?: number
-    height?: number
-    srcset?: string
-    alt?: string
+    /** Raw entity meta block — opaque (mime, dimensions, duration, …). */
     meta?: Record<string, unknown>
-}
-
-export interface ImageProps {
-    src: string
-    width?: number
-    height?: number
-    srcset?: string
-    alt?: string
 }
 
 export interface AssetIndex {
     asset(ref: string): AssetRecord | null
-    image(ref: string): ImageProps | null
     map: Record<string, AssetRecord>
 }
 
+export interface AssetUrlOptions {
+    /** Origin of the mikser server; omit for a root-relative URL. */
+    baseUrl?: string
+    /** Preset output format — replaces the source extension (.mp4 → .jpg). */
+    ext?: string
+}
+
 /**
- * Build an asset metadata lookup from a snapshot of asset entities.
- * Pure data transformation — wrap in a framework-specific reactive
- * shell to drive `useAsset` composables.
+ * URL of a transcoded derivative, by the assets() plugin convention:
+ * `<baseUrl>/assets/<preset>/<source>`. Format-neutral (video, image,
+ * pdf, audio, …) — mikser's assets() is a preset transcoder, not an
+ * image pipeline.
+ */
+export function assetUrl(source: string, preset: string, options?: AssetUrlOptions): string
+
+/**
+ * Build a format-neutral lookup (id → { url, meta }) from a snapshot of
+ * managed asset entities. Pure data transformation — wrap in a
+ * framework-specific reactive shell to drive `useAsset` composables.
  */
 export function createAssetIndex(
     assets: Array<{ id: string; meta?: Record<string, unknown> }>,
