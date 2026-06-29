@@ -22,20 +22,31 @@
  * @returns {{
  *   href: (ref: string, lang?: string) => string,
  *   refFor: (url: string|null) => string|null,
+ *   docFor: (ref: string, lang?: string) => object|null,
+ *   metaFor: (ref: string, lang?: string) => object|null,
  *   alternates: (opts: { route: string|null, languages?: string[] }) => { current: {lang, url, ref}|null, alternates: Array<{lang, url}> },
  *   map: Record<string, Record<string, string>>,
  * }}
  */
 export function createHrefIndex(documents, { defaultLang = 'default' } = {}) {
     const map = {}
+    // ref → lang → document. The index already iterates every document
+    // with its full meta to build `map`; keeping the document here too
+    // turns the href index into a content index — `metaFor('/menu')`
+    // reads a known document by its logical reference, the companion to
+    // `href('/menu')` resolving the URL. Costs one extra object slot per
+    // document; the data was already in hand.
+    const docs = {}
     if (Array.isArray(documents)) {
         for (const document of documents) {
             const ref = document?.meta?.href
             if (!ref) continue
             const lang = document.meta?.lang ?? defaultLang
             const url  = document.meta?.route ?? document.meta?.destination ?? ref
-            if (!map[ref]) map[ref] = {}
-            map[ref][lang] = url
+            if (!map[ref])  map[ref]  = {}
+            if (!docs[ref]) docs[ref] = {}
+            map[ref][lang]  = url
+            docs[ref][lang] = document
         }
     }
 
@@ -54,6 +65,32 @@ export function createHrefIndex(documents, { defaultLang = 'default' } = {}) {
             ?? entry['default']
             ?? Object.values(entry)[0]
             ?? ref
+    }
+
+    /**
+     * Resolve a logical reference to its document — the content
+     * companion to href(). Same lang-fallback chain (requested lang →
+     * 'default' → any available). Returns null when the ref isn't in
+     * the index (a missing document can't be faked the way a missing
+     * URL falls back to the ref string).
+     */
+    function docFor(ref, lang) {
+        const target = lang ?? defaultLang
+        const entry = docs[ref]
+        if (!entry) return null
+        return entry[target]
+            ?? entry['default']
+            ?? Object.values(entry)[0]
+            ?? null
+    }
+
+    /**
+     * The meta of the document a logical reference resolves to — the
+     * 90% case (read fields off known content by its ref). Shorthand
+     * for `docFor(ref, lang)?.meta`.
+     */
+    function metaFor(ref, lang) {
+        return docFor(ref, lang)?.meta ?? null
     }
 
     /**
@@ -106,5 +143,5 @@ export function createHrefIndex(documents, { defaultLang = 'default' } = {}) {
         return { current, alternates: list }
     }
 
-    return { href, refFor, alternates, map }
+    return { href, refFor, docFor, metaFor, alternates, map }
 }
