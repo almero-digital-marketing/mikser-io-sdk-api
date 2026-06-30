@@ -29,7 +29,8 @@
 //   src/entities.js  — per-endpoint entities client (list / watch / live / ...)
 //   src/routes.js    — generateMikserRoutes (build-time route enumeration)
 //   src/href.js      — createHrefIndex (multilingual reference → URL lookup)
-//   src/asset.js     — createAssetIndex (asset metadata lookup)
+//   src/asset.js     — deployedUrl / watchAssetFallbacks / createAssetIndex
+//   src/cache.js     — createCache / cacheKey (load-once memoized list())
 import { MikserError } from './src/error.js'
 import { createEntitiesClient } from './src/entities.js'
 
@@ -65,4 +66,5 @@ export function createClient({
 export { MikserError }
 export { generateMikserRoutes } from './src/routes.js'
 export { createHrefIndex }      from './src/href.js'
-export { createAssetIndex, assetUrl } from './src/asset.js'
+export { createAssetIndex, deployedUrl, watchAssetFallbacks } from './src/asset.js'
+export { createCache, cacheKey } from './src/cache.js'

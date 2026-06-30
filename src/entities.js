@@ -556,19 +556,45 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                     }
 
                     if (!usedFastPath) {
-                        // Pass { quiet } so list()'s wide-warning honors
-                        // the live() caller's quiet opt.
+                        // The initial snapshot must be the COMPLETE matching
+                        // set, not a single server page. watch() below
+                        // subscribes by filter with no limit, so create /
+                        // update / delete events arrive for ANY matching
+                        // entity. If the initial load stopped at the server's
+                        // default page size, an update to an entity past page 1
+                        // would silently no-op (it isn't in `items`) and a
+                        // create could append out of sort order — the live view
+                        // would drift out of sync with its own change stream.
+                        // So paginate to completion, unless the caller opted
+                        // into a bounded window via `limit` or `skip`.
                         //
-                        // `expand` flows through to the initial snapshot
-                        // call AND to watch() below, so the server's
-                        // graph-subscription path (runtime.refs) emits
-                        // already-expanded entities on every mutation
-                        // within the expansion graph. Update events
-                        // replace items in place with the new expanded
-                        // shape, keeping the consumer's view consistent.
-                        const env = await list({ filter, sort, fields, limit, skip, expand }, { quiet })
-                        if (disposed || ac.signal.aborted) return
-                        items = env.items
+                        // Pass { quiet } so list()'s wide-warning honors the
+                        // live() caller's quiet opt.
+                        //
+                        // `expand` flows through to the initial snapshot call
+                        // AND to watch() below, so the server's graph-
+                        // subscription path (runtime.refs) emits already-
+                        // expanded entities on every mutation within the
+                        // expansion graph. Update events replace items in place
+                        // with the new expanded shape, keeping the consumer's
+                        // view consistent.
+                        const bounded = limit != null || skip != null
+                        if (bounded) {
+                            const env = await list({ filter, sort, fields, limit, skip, expand }, { quiet })
+                            if (disposed || ac.signal.aborted) return
+                            items = env.items
+                        } else {
+                            const collected = []
+                            let page = 1
+                            while (true) {
+                                const env = await list({ filter, sort, fields, expand, limit: 1000, page }, { quiet })
+                                if (disposed || ac.signal.aborted) return
+                                collected.push(...env.items)
+                                if (!env.hasNext) break
+                                page = env.page + 1
+                            }
+                            items = collected
+                        }
                         onChange(items)
                     }
 

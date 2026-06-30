@@ -285,6 +285,21 @@ expand: ['sections.*.image']
 // → each section's $image becomes the resolved image entity
 ```
 
+**Resolve every reference with `$`** — when you don't want to enumerate a document's shape:
+
+```js
+// $ resolves every $-keyed ref reachable in the doc, one hop, at any depth.
+expand: ['$']
+// → author, hero, every section's image, every related entry — all hydrated,
+//   without naming where any of them sit.
+
+// $.$.$ walks the resolved graph deeper: refs, then refs of those, then refs
+// of those. A literal prefix scopes it — 'faq.$' resolves refs under faq only.
+expand: ['$.$.$', 'faq.$']
+```
+
+Where `*` iterates array indices, `$` iterates *references* — it descends objects and arrays structure-agnostically and expands what it finds. Useful when a consumer wants resolution but shouldn't have to know the document's internal shape (a framework SDK passing `expand: ['$']` for the current document, say). Still bounded by the same caps below — `maxResolved` is what keeps `$` honest.
+
 **Multiple paths in one call**:
 
 ```js
@@ -453,6 +468,8 @@ For framework integration, prefer `live()` below — it handles the list+watch c
 
 The higher-level real-time primitive. Calls `onChange(items)` with the initial snapshot, then again with the patched array on every create/update/delete event. Returns a dispose function.
 
+The initial snapshot is the **complete** matching set — `live()` paginates to the end, it doesn't stop at the server's default page size. This keeps the snapshot consistent with the SSE stream that follows: `watch()` subscribes by filter with no limit, so a create/update/delete to *any* matching entity is delivered; if the snapshot were capped at page one, updates to entities past it would silently no-op (they aren't in `items`) and the view would drift. Pass `limit` (or `skip`) only when you want a bounded window — a "latest N" feed — and accept that updates outside that window won't be reflected.
+
 ```js
 const dispose = docs.live(
     { 'meta.published': true, type: 'document' },
@@ -476,7 +493,8 @@ dispose()
 Equivalent to:
 
 ```js
-// 1. await list({ filter, sort, fields, limit, skip })
+// 1. paginate list({ filter, sort, fields }) to the end  (or one bounded
+//    list() when limit/skip is set)
 // 2. onChange(items)
 // 3. for await (event of watch({ filter })) patch + onChange
 // 4. abort on dispose
@@ -485,6 +503,55 @@ Equivalent to:
 …but with race-safe cleanup (no `mounted` flag needed in caller code), unified error routing via `onError`, and a single dispose path. This is the building block the [framework SDKs](#framework-integration) (Vue / React / Svelte) consume internally — and the surface to use directly if you're writing a custom adapter.
 
 `live()` keeps an internal `items` array, patches it on each event, and hands the whole array to `onChange` every time. That's the simplest contract for frameworks with state-replace semantics (the callback just overwrites state). If you need per-event deltas — animated reveals, audit logs, derived counters — use `watch()` directly.
+
+### `createCache(docs)` / `cacheKey(query)` — load-once memoized reads
+
+A local request cache: dedupe + memoize over an entities client's `list()`. For content you read repeatedly but that changes rarely — system docs, navigation, site settings — re-fetching on every component mount is wasted work. `createCache` is the lightweight tier next to `live()`: `live()` is an always-fresh SSE subscription; this is **load-once with explicit invalidation**.
+
+```js
+import { createCache } from 'mikser-io-sdk-api'
+
+const cache = createCache(client.entities('public'))
+
+// First call fetches; subsequent calls for the same query are served from memory.
+const { items } = await cache.get({ filter: { type: 'navigation' } })
+
+// Sync read — envelope if loaded, undefined otherwise.
+cache.peek({ filter: { type: 'navigation' } })   // { items, total, … } | undefined
+
+// Drop entries when you know the underlying content changed.
+cache.invalidate({ filter: { type: 'navigation' } })  // one entry
+cache.invalidate()                                     // everything
+```
+
+`createCache(client.entities('public'))` returns:
+
+| Method | What it does |
+|---|---|
+| `get(query, opts)` | Returns the same envelope as `list()` (`{ items, total, … }`). Memoizes the result; concurrent `get()`s for the same query share one in-flight request. A **failed** `get()` is not memoized — the next call retries. |
+| `peek(query)` | Sync read: the cached envelope, or `undefined` if not loaded. No fetch. |
+| `has(query)` | Sync `true`/`false` — is this query cached? |
+| `invalidate(query?)` | Drop one entry (`invalidate(query)`) or all of them (`invalidate()`). |
+| `subscribe(cb)` | Register a change listener; called on any `get` resolution or `invalidate`. Returns an unsubscribe fn. The framework SDKs build reactive reads on top of this. |
+| `key` | The `cacheKey` function (below), exposed for callers that want to key their own structures the same way. |
+
+**Keyed by the whole query.** The cache key covers `filter` / `sort` / `fields` / `expand` / `limit` / `skip` / `page` — so a with-expand and a without-expand read of the **same filter** are *distinct* entries. This is the same identity rule `cacheKeyFor()` and the api plugin's on-disk cache name already follow; a key that ignored `expand` would let a no-expand load shadow an expanded one. `cacheKey(query)` is the pure key function if you need it standalone:
+
+```js
+import { cacheKey } from 'mikser-io-sdk-api'
+
+cacheKey({ filter: { type: 'nav' } })
+cacheKey({ filter: { type: 'nav' }, expand: ['icon'] })   // ≠ the line above
+```
+
+#### Which caching tier?
+
+| Tier | Surface | Use when |
+|---|---|---|
+| One-shot | `list(query)` | A single read; you'll re-fetch yourself if you need it again. |
+| Stateful pages | `paginator(options)` | UI navigation through pages; current-page state lives in the paginator. |
+| Always-fresh feed | `live(filter, onChange)` | The view must stay in sync as content changes (SSE-driven). |
+| Load-once memoized | `createCache(docs)` | Read-repeatedly, changes-rarely content; load once, invalidate explicitly. |
 
 ### `update(payload)` / `delete(payload)` — writes
 
@@ -519,6 +586,65 @@ Return shape follows the response `content-type`:
 - `application/json` → parsed JSON
 - `text/*` → `string`
 - anything else (`application/pdf`, images, …) → `ArrayBuffer`
+
+## Assets
+
+Helpers for resolving served files and their transcoded derivatives. mikser's `assets()` plugin is a preset transcoder (video, image, pdf, audio), not an image pipeline — so these are format-neutral. Image-specific concerns (srcset, dimensions, `<img>` props) are a consumer concern; build them on top of `meta` where you actually know an asset is an image.
+
+### `deployedUrl(ref, { baseUrl })` — prefix a served path with the client base
+
+The catalog now carries the served path itself — `meta.url` for a file, `meta.presets.<name>` for a transcoded derivative; the engine stamps them per [ADR-0011](https://github.com/almero-digital-marketing/mikser-io/blob/main/documentation/decisions/0011-asset-urls.md). So the SDK no longer *constructs* `/assets/<preset>/<source>` client-side; it just prefixes the base. One rule for every served reference, files and derivatives alike.
+
+```js
+import { deployedUrl } from 'mikser-io-sdk-api'
+
+deployedUrl(product.image.meta.url, { baseUrl: 'https://cms.example.com' })
+// → https://cms.example.com/img/products/x.jpg
+
+deployedUrl(product.video.meta.presets.poster, { baseUrl: 'https://cms.example.com' })
+// → https://cms.example.com/assets/poster/…x.jpg
+```
+
+- **Empty `baseUrl`** (the default) → returns the ref root-relative, for same-origin serving.
+- **Already-absolute ref** (`https://…` — e.g. a render baked the origin in) → passes through untouched.
+- **Falsy ref** → `''`.
+
+```js
+deployedUrl('/img/x.jpg')                                  // '/img/x.jpg'   (root-relative)
+deployedUrl('/img/x.jpg', { baseUrl: 'https://cms' })      // 'https://cms/img/x.jpg'
+deployedUrl('https://cdn.example.com/x.jpg')               // unchanged (absolute passthrough)
+```
+
+> `deployedUrl` **replaces** the old `assetUrl(source, preset, { ext })`, which constructed the derivative path client-side. That path now lives in the catalog (`meta.url` / `meta.presets.<name>`), so the SDK only prefixes the base — `assetUrl` is gone.
+
+### `watchAssetFallbacks({ doc, warn })` — dev-mode safety net
+
+A development aid (ADR-0011 Part E). It warns when an `<img>` or `<video>` fails to load — the signature of a served-file URL that hit the SPA's HTML fallback. When a served URL is missing its base prefix or points at an unexpanded reference, the app origin answers with `text/html`, which can't decode as media, so the element fires an `error` event. `watchAssetFallbacks` catches that and warns, pointing at the likely cause.
+
+```js
+import { watchAssetFallbacks } from 'mikser-io-sdk-api'
+
+if (import.meta.env.DEV) watchAssetFallbacks()
+```
+
+It installs a **capture-phase** `error` listener (media `error` events don't bubble) and returns a teardown function. Outside a browser it's a no-op that returns a no-op teardown, so it's safe to call unconditionally during SSR.
+
+| Option | Default | What it does |
+|---|---|---|
+| `doc` | `globalThis.document` | The document to listen on. Override for an iframe or a test DOM. |
+| `warn` | `console.warn` | Where the warning goes. Override to route into your own logger. |
+
+### `createAssetIndex(assets)` — id → `{ url, meta }` lookup
+
+Format-neutral lookup for managed asset entities that carry their own URL and metadata. `createAssetIndex(assets)` returns `{ asset, map }`; `asset(ref)` resolves an entity `id` to `{ url, meta } | null`, and `map` is the same data as a plain object. `meta` is the entity's raw meta block — opaque (mime, dimensions, duration, whatever the preset emitted), so a consumer that knows an asset is an image reads `meta.width` / `meta.srcset` itself.
+
+```js
+import { createAssetIndex } from 'mikser-io-sdk-api'
+
+const { asset } = createAssetIndex(items)
+asset('/images/launch-hero')   // { url: '/img/launch-hero.jpg', meta: { width: 1600, … } }
+asset('/images/missing')       // null
+```
 
 ## Recipes — composing real-time and search
 

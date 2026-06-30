@@ -311,20 +311,19 @@ export interface AssetIndex {
     map: Record<string, AssetRecord>
 }
 
-export interface AssetUrlOptions {
-    /** Origin of the mikser server; omit for a root-relative URL. */
-    baseUrl?: string
-    /** Preset output format — replaces the source extension (.mp4 → .jpg). */
-    ext?: string
-}
+/**
+ * Join a base-relative served path to a base. An empty baseUrl yields a
+ * root-relative URL; an already-absolute ref passes through unchanged; an
+ * empty ref returns ''.
+ */
+export function deployedUrl(ref: string, options?: { baseUrl?: string }): string
 
 /**
- * URL of a transcoded derivative, by the assets() plugin convention:
- * `<baseUrl>/assets/<preset>/<source>`. Format-neutral (video, image,
- * pdf, audio, …) — mikser's assets() is a preset transcoder, not an
- * image pipeline.
+ * Dev-mode load-failure warner: attaches listeners that log a warning when
+ * an <img>/<video> fails to load. Returns a teardown function. No-op
+ * outside a browser.
  */
-export function assetUrl(source: string, preset: string, options?: AssetUrlOptions): string
+export function watchAssetFallbacks(options?: { doc?: Document; warn?: (message: string) => void }): () => void
 
 /**
  * Build a format-neutral lookup (id → { url, meta }) from a snapshot of
@@ -334,4 +333,33 @@ export function assetUrl(source: string, preset: string, options?: AssetUrlOptio
 export function createAssetIndex(
     assets: Array<{ id: string; meta?: Record<string, unknown> }>,
 ): AssetIndex
+
+/**
+ * Memoizing cache over an entities client's list() — keyed by query.
+ * Frameworks wrap this in their own reactive shell; the engine layer
+ * just deduplicates and serves cached envelopes.
+ */
+export interface Cache {
+    /** Fetch (and cache) the envelope for a query; resolves from cache when present. */
+    get(query?: ListQuery, options?: object): Promise<ListEnvelope>
+    /** Synchronously read a cached envelope without fetching, or undefined when absent. */
+    peek(query?: ListQuery): ListEnvelope | undefined
+    /** Whether a cached envelope exists for the query. */
+    has(query?: ListQuery): boolean
+    /** Drop the cached envelope for the query and notify subscribers. */
+    invalidate(query?: ListQuery): void
+    /** Subscribe to cache changes; returns an unsubscribe function. */
+    subscribe(callback: () => void): () => void
+    /** The canonical cache key for a query — stable across equivalent queries. */
+    key(query?: ListQuery): string
+}
+
+/**
+ * Build a {@link Cache} over an object exposing `list(query, options)` —
+ * typically an EntitiesClient.
+ */
+export function createCache(docs: { list(query?: ListQuery, options?: object): Promise<ListEnvelope> }): Cache
+
+/** The canonical cache key for a query — stable across equivalent queries. */
+export function cacheKey(query?: ListQuery): string
 

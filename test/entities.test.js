@@ -695,4 +695,59 @@ describe('entities().live', () => {
         // first onChange should prevent any snapshots from landing.
         expect(snapshots.length).toBe(0)
     })
+
+    it('initial snapshot paginates the COMPLETE matching set, not just page 1', async () => {
+        // The bug this guards against: live() used to do a single list()
+        // for its initial snapshot, capped at the server's default page
+        // size — so a filter matching more than one page silently dropped
+        // everything past page 1, leaving the snapshot out of sync with
+        // the unbounded watch() stream that follows.
+        const stream = sseStream(['event: init\ndata: {}\n\n'])
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [{ id: 'a' }, { id: 'b' }], page: 1, limit: 1000, total: 3, hasNext: true }) }),
+            () => fakeResponse({ json: envelope({ items: [{ id: 'c' }],            page: 2, limit: 1000, total: 3, hasNext: false }) }),
+            () => fakeResponse({ body: stream }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+
+        const snapshots = []
+        const dispose = client.entities('public').live({ 'meta.published': true }, (items) => {
+            snapshots.push(items.map(i => i.id))
+        })
+        await new Promise(r => setTimeout(r, 30))
+        dispose()
+        await new Promise(r => setTimeout(r, 10))
+
+        // First snapshot already carries every page's items.
+        expect(snapshots[0]).toEqual(['a', 'b', 'c'])
+        // Two list() pages were fetched before the subscribe stream opened.
+        const listCalls = fetch.calls.filter(([url]) => !String(url).includes('/entities/subscribe'))
+        expect(listCalls).toHaveLength(2)
+    })
+
+    it('a bounded window (limit) does a single list(), not full pagination', async () => {
+        // When the caller asks for a "latest N" window, honor it: one
+        // list() call, no follow-on pages — even if the server reports
+        // hasNext. The window is intentionally partial.
+        const stream = sseStream(['event: init\ndata: {}\n\n'])
+        const fetch = scriptedFetch([
+            () => fakeResponse({ json: envelope({ items: [{ id: 'a' }, { id: 'b' }], page: 1, limit: 2, total: 9, hasNext: true }) }),
+            () => fakeResponse({ body: stream }),
+        ])
+        const client = createClient({ baseUrl: 'http://x', fetch })
+
+        const snapshots = []
+        const dispose = client.entities('public').live({}, (items) => {
+            snapshots.push(items.map(i => i.id))
+        }, { limit: 2 })
+        await new Promise(r => setTimeout(r, 30))
+        dispose()
+        await new Promise(r => setTimeout(r, 10))
+
+        expect(snapshots[0]).toEqual(['a', 'b'])
+        const listCalls = fetch.calls.filter(([url]) => !String(url).includes('/entities/subscribe'))
+        expect(listCalls).toHaveLength(1)
+        // The single list() carried the caller's limit through to the server.
+        expect(String(listCalls[0][0])).toContain('limit=2')
+    })
 })

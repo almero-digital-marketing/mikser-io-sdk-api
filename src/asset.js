@@ -7,25 +7,55 @@
 import { joinUrl } from './url.js'
 
 /**
- * URL of a transcoded derivative, by the assets() plugin convention:
+ * Join a deployed, base-relative served path to the client base (ADR-0011).
  *
- *   <baseUrl>/assets/<preset>/<source>
+ * The catalog already carries the path — `meta.url` for a file, or
+ * `meta.presets.<name>` for a transcoded derivative (the assets() plugin
+ * stamps them). The SDK no longer *constructs* `/assets/<preset>/<source>`
+ * client-side; it only prefixes the base. One rule for every served
+ * reference, files and derivatives alike:
  *
- * `source` is the source ref, e.g. `/media/bg/clip.mp4`. `ext`, when
- * given, is the preset's output format and REPLACES the source extension
- * (a poster preset turns .mp4 → .jpg); omit it to keep the source ext.
- * `baseUrl` is optional — omit for a same-origin, root-relative URL.
+ *   url(product.image.meta.url)             // <base>/img/products/X.jpg
+ *   url(product.video.meta.presets.poster)  // <base>/assets/poster/…X.jpg
  *
- * @param {string} source
- * @param {string} preset
- * @param {{ baseUrl?: string, ext?: string }} [options]
+ * `baseUrl` empty → same-origin, root-relative. An already-absolute ref
+ * (a render baked the origin in) passes through untouched.
+ *
+ * @param {string} ref  A base-relative served path, e.g. `/img/x.jpg`.
+ * @param {{ baseUrl?: string }} [options]
  * @returns {string}
  */
-export function assetUrl(source, preset, { baseUrl = '', ext } = {}) {
-    if (!source || !preset) return ''
-    const file = ext ? source.replace(/\.[^./]+$/, `.${ext}`) : source
-    const path = `/assets/${preset}/${file.replace(/^\/+/, '')}`
-    return baseUrl ? joinUrl(baseUrl, path) : path
+export function deployedUrl(ref, { baseUrl = '' } = {}) {
+    if (!ref) return ''
+    if (/^https?:\/\//i.test(ref)) return ref
+    return baseUrl ? joinUrl(baseUrl, ref) : ref
+}
+
+/**
+ * Dev-mode safety net (ADR-0011 Part E). Warns when an `<img>` / `<video>`
+ * failed to load — the signature of a served-file URL that hit the app
+ * origin and got the SPA's HTML fallback (`text/html` can't decode as an
+ * image → an `error` event), i.e. a missing base prefix or an unexpanded
+ * served-entity reference. Capture phase, because media `error` events
+ * don't bubble. Returns a teardown function; no-op outside a browser.
+ *
+ *   if (import.meta.env.DEV) watchAssetFallbacks()
+ */
+export function watchAssetFallbacks({ doc = globalThis.document, warn = console.warn } = {}) {
+    if (!doc || typeof doc.addEventListener !== 'function') return () => {}
+    function onError(event) {
+        const el = event.target
+        if (!el || (el.tagName !== 'IMG' && el.tagName !== 'VIDEO')) return
+        const src = el.currentSrc || el.src || el.poster
+        if (!src) return
+        warn(
+            `[mikser] asset failed to load: ${src}\n` +
+            `  Did it resolve to the SPA fallback (text/html)? Likely a missing ` +
+            `base prefix (use url(ref)) or an unexpanded served-entity reference (ADR-0011).`,
+        )
+    }
+    doc.addEventListener('error', onError, true)
+    return () => doc.removeEventListener('error', onError, true)
 }
 
 /**
