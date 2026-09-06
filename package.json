@@ -18,6 +18,9 @@
     "README.md",
     "LICENSE"
   ],
+  "allowScripts": {
+    "better-sqlite3": true
+  },
   "scripts": {
     "test": "vitest",
     "test:run": "vitest run"
