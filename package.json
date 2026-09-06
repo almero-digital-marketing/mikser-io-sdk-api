@@ -1,7 +1,7 @@
 {
   "name": "mikser-io-sdk-api",
-  "version": "3.7.0",
-  "description": "Client SDK for mikser-io's api plugin \u2014 query the document catalog from the browser or Node",
+  "version": "11.0.1",
+  "description": "Client SDK for mikser-io's api plugin — query the document catalog from the browser or Node",
   "main": "index.js",
   "types": "index.d.ts",
   "type": "module",
@@ -26,7 +26,7 @@
     "test:run": "vitest run"
   },
   "devDependencies": {
-    "mikser-io": "^10.0.0",
+    "mikser-io": "^11.0.1",
     "vitest": "^4.1.8"
   },
   "repository": {
