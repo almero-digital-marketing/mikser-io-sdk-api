@@ -26,9 +26,23 @@ function buildQueryParams(query, params) {
 // First 16 hex chars of sha256(str) — matches the server's algorithm in
 // `cacheNameForQueryString`. Uses the standard Web Crypto API which is
 // available in browsers and Node 18+ as `globalThis.crypto.subtle`.
+//
+// NULL where Web Crypto is not there. `crypto.subtle` exists only in a SECURE
+// CONTEXT — https, or localhost — so a dev server reached over the LAN at
+// http://192.168.x.x:5173 does not have it. This used to read `.digest` off
+// undefined and throw "Cannot read properties of undefined", which took down
+// every list() in the SDK and with it the whole app, on precisely the setup
+// someone uses to check a build from their phone.
+//
+// The caller drops the `cache=` hint when this returns null: the request is
+// then uncached but correct. Substituting a non-crypto hash would be worse
+// than having none, because the value has to match a name the SERVER
+// computed — a cheaper hash would miss every time, silently.
 async function sha256HexPrefix16(str) {
+    const subtle = globalThis.crypto?.subtle
+    if (!subtle) return null
     const bytes = new TextEncoder().encode(str)
-    const buf = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+    const buf = await subtle.digest('SHA-256', bytes)
     const arr = new Uint8Array(buf)
     let hex = ''
     for (let i = 0; i < 8; i++) {
@@ -262,7 +276,10 @@ export function createEntitiesClient({ baseUrl, basePath, fetch: doFetch, header
                     // Skipped when there's nothing to hash (empty
                     // query → 'index.json' on the server).
                     const cacheKey = await cacheKeyFor(query)
-                    if (cacheKey !== 'index') {
+                    // null means Web Crypto was unavailable — see
+                    // sha256HexPrefix16. Ask for the query uncached rather
+                    // than naming a cache file that cannot be right.
+                    if (cacheKey && cacheKey !== 'index') {
                         url = url.includes('?')
                             ? `${url}&cache=${cacheKey}`
                             : `${url}?cache=${cacheKey}`

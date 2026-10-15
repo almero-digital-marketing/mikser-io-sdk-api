@@ -247,6 +247,40 @@ describe('entities().cacheKeyFor', () => {
         expect(key).toBe(expectedHashFor('limit=10&sort=-meta.date&meta.published=true'))
     })
 
+    // `crypto.subtle` exists only in a secure context — https or localhost —
+    // so a dev server opened over the LAN (http://192.168.x.x:5173) has none.
+    // Reading `.digest` off it used to throw and take every list() with it.
+    it('returns null instead of throwing when Web Crypto is unavailable', async () => {
+        const real = globalThis.crypto
+        Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true })
+        try {
+            const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
+            const key = await client.entities('public').cacheKeyFor({ limit: 1 })
+            expect(key).toBeNull()
+        } finally {
+            Object.defineProperty(globalThis, 'crypto', { value: real, configurable: true })
+        }
+    })
+
+    it('omits the cache hint from the request when Web Crypto is unavailable', async () => {
+        const real = globalThis.crypto
+        Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true })
+        try {
+            const urls = []
+            const client = createClient({
+                baseUrl: 'http://x',
+                fetch: (url) => { urls.push(String(url)); return fakeResponse() },
+            })
+            await client.entities('public').list({ limit: 1 })
+            // The query still goes out; it simply is not asking for a named
+            // cache file it cannot compute the name of.
+            expect(urls.length).toBeGreaterThan(0)
+            expect(urls.some(u => u.includes('cache='))).toBe(false)
+        } finally {
+            Object.defineProperty(globalThis, 'crypto', { value: real, configurable: true })
+        }
+    })
+
     it('returns "index" for an empty query', async () => {
         const client = createClient({ baseUrl: 'http://x', fetch: () => fakeResponse() })
         const key = await client.entities('public').cacheKeyFor({})
